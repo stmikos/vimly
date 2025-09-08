@@ -1,0 +1,24 @@
+services:
+- type: web
+  name: vimly-client-demo-bot
+  env: python
+  plan: free
+  buildCommand: pip install -r requirements.txt
+  startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+  envVars:
+    - key: BOT_TOKEN
+      sync: false
+    - key: ADMIN_CHAT_ID
+      sync: false
+    - key: BASE_URL
+      sync: false
+    - key: WEBHOOK_PATH
+      value: /telegram/webhook/vimly
+    - key: WEBHOOK_SECRET
+      generateValue: true
+    - key: BRAND_NAME
+      value: Vimly
+    - key: BRAND_TAGLINE
+      value: Боты, которые продают
+    - key: BRAND_TG
+      value: @Vimly_bot
