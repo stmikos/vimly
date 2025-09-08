@@ -1,10 +1,26 @@
+# -*- coding: utf-8 -*-
+"""
+Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
+
+Особенности:
+- Инициализация Bot с DefaultBotProperties(parse_mode=Markdown) — требуется aiogram>=3.7
+- Dispatcher объявлен ДО хендлеров
+- Нормализация BASE_URL/WEBHOOK_PATH, чтобы избежать "invalid webhook URL"
+- Стартап не падает, если вебхук не выставился (пишет в лог и продолжает)
+- Эндпоинт /healthz для Render
+
+Запуск на Render:
+Build:  pip install -r requirements.txt
+Start:  uvicorn app:app --host 0.0.0.0 --port $PORT
+"""
+
 # --- imports ---
 import os, logging, re, asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -24,36 +40,42 @@ try:
 except Exception:
     pass
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+def _norm_base_url(s: str) -> str:
+    """Обрезаем пробелы и завершающий слэш"""
+    s = (s or "").strip()
+    return s[:-1] if s.endswith("/") else s
+
+def _norm_path(p: str) -> str:
+    """Обрезаем пробелы и гарантируем ведущий /"""
+    p = (p or "").strip()
+    return p if p.startswith("/") else f"/{p}"
+
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN env var")
 
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0") or "0")
-BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram/webhook/vimly")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-MODE = os.getenv("MODE", "webhook").lower()
+ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
+BASE_URL = _norm_base_url(os.getenv("BASE_URL"))
+WEBHOOK_PATH = _norm_path(os.getenv("WEBHOOK_PATH") or "/telegram/webhook/vimly")
+WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
+MODE = (os.getenv("MODE") or "webhook").strip().lower()  # webhook | polling
 
 # --- branding ---
-BRAND_NAME = os.getenv("BRAND_NAME", "Vimly").strip()
-BRAND_TAGLINE = os.getenv("BRAND_TAGLINE", "Боты, которые продают").strip()
-BRAND_TG = os.getenv("BRAND_TG", "@Vimly_bot").strip()
-BRAND_SITE = os.getenv("BRAND_SITE", "").strip()
+BRAND_NAME = (os.getenv("BRAND_NAME") or "Vimly").strip()
+BRAND_TAGLINE = (os.getenv("BRAND_TAGLINE") or "Боты, которые продают").strip()
+BRAND_TG = (os.getenv("BRAND_TG") or "@Vimly_bot").strip()
+BRAND_SITE = (os.getenv("BRAND_SITE") or "").strip()
 
+# --- logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("vimly-demo")
 
-# --- aiogram 3.7+ init: bot + dp (ДОЛЖНО БЫТЬ ДО ХЕНДЛЕРОВ) ---
-try:
-    from aiogram.client.default import DefaultBotProperties
-    from aiogram.enums import ParseMode
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
-except Exception:
-    # fallback для aiogram < 3.7
-    bot = Bot(BOT_TOKEN)
+# --- aiogram 3.7+ init (ДОЛЖНО БЫТЬ ДО ХЕНДЛЕРОВ) ---
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
-dp = Dispatcher()  # <<< ВАЖНО: объявлен ДО всех @dp.message / @dp.callback_query
-
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+dp = Dispatcher()  # <= объявлен до декораторов
 
 # ---- STORE (in-memory demo) ----
 class Store:
@@ -77,7 +99,7 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💼 Кейсы (демо)", callback_data="go_cases"),
         ],
         [
-            InlineKeyboardButton(text="🧪 Квиз‑заявка", callback_data="go_quiz"),
+            InlineKeyboardButton(text="🧪 Квиз-заявка", callback_data="go_quiz"),
             InlineKeyboardButton(text="💸 Пакеты и цены", callback_data="go_prices"),
         ],
         [
@@ -102,7 +124,7 @@ def admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📈 Статистика", callback_data="admin_stats"),
         ],
         [
-            InlineKeyboardButton(text="📣 Тест‑рассылка", callback_data="admin_broadcast"),
+            InlineKeyboardButton(text="📣 Тест-рассылка", callback_data="admin_broadcast"),
             InlineKeyboardButton(text="⬅️ Меню", callback_data="go_menu"),
         ]
     ])
@@ -120,8 +142,7 @@ def ufmt(m: Message) -> str:
     return f"{user.full_name} ({tag})"
 
 def sanitize_phone(s: str) -> Optional[str]:
-    import re as _re
-    digits = _re.sub(r"\D+", "", s or "")
+    digits = re.sub(r"\D+", "", s or "")
     return digits if 7 <= len(digits) <= 15 else None
 
 async def notify_admin(text: str):
@@ -150,8 +171,8 @@ async def on_menu(m: Message):
 @dp.message(Command("admin"))
 async def on_admin(m: Message):
     if m.from_user.id != ADMIN_CHAT_ID:
-        return await m.answer("Админ‑панель доступна владельцу бота.")
-    await m.answer("Админ‑панель:", reply_markup=admin_kb())
+        return await m.answer("Админ-панель доступна владельцу бота.")
+    await m.answer("Админ-панель:", reply_markup=admin_kb())
 
 # --- Callbacks: меню ---
 @dp.callback_query(F.data == "go_menu")
@@ -164,7 +185,7 @@ async def cb_process(c: CallbackQuery):
     txt = (
         "Как запускаем за 1–3 дня:\n"
         "1) *Созвон 15 минут* — фиксируем цели\n"
-        "2) *MVP* — меню + квиз + админ‑чат\n"
+        "2) *MVP* — меню + квиз + админ-чат\n"
         "3) *Запуск* — подключаем Sheets/оплату/канал\n"
         "4) *Поддержка* — рассылки, правки, отчёты\n\n"
         "Сроки и бюджет фиксируем письменно."
@@ -178,7 +199,7 @@ async def cb_cases(c: CallbackQuery):
         "Кейсы (демо):\n"
         "• Барбершоп — запись и отзывы, 2 экрана, +26 заявок/мес\n"
         "• Пекарня — квиз + купоны, ~18% конверсия в визит\n"
-        "• Автор‑канал — оплата → доступ в закрытый чат\n"
+        "• Автор-канал — оплата → доступ в закрытый чат\n"
         "• Коворкинг — афиша/RSVP, считает гостей и выгружает список\n\n"
         "Покажу живые прототипы на созвоне."
     )
@@ -190,7 +211,7 @@ async def cb_prices(c: CallbackQuery):
     txt = (
         "*Пакеты и цены:*\n\n"
         "• *Lite* — 15–20k ₽: меню/квиз/заявки, без БД и оплаты\n"
-        "• *Standard* — 25–45k ₽: + Google Sheets, админ‑панель, напоминания\n"
+        "• *Standard* — 25–45k ₽: + Google Sheets, админ-панель, напоминания\n"
         "• *Pro* — 50–90k ₽: + оплата, доступ в канал, логи, бэкапы\n\n"
         "_Поддержка 3–10k ₽/мес_: правки, рассылки, мониторинг"
     )
@@ -211,11 +232,11 @@ async def cb_contacts(c: CallbackQuery):
 @dp.callback_query(F.data == "go_brief")
 async def cb_brief(c: CallbackQuery):
     brief = (
-        "*Мини‑бриф (7 вопросов):*\n"
+        "*Мини-бриф (7 вопросов):*\n"
         "1) Ниша и город\n"
         "2) Цель бота (заявки/запись/оплата/отзывы)\n"
         "3) Кнопки меню (4–6)\n"
-        "4) Что слать в админ‑чат (лиды/фото/файлы)\n"
+        "4) Что слать в админ-чат (лиды/фото/файлы)\n"
         "5) Нужны ли Google Sheets и рассылки\n"
         "6) Нужна ли оплата и доступ в канал\n"
         "7) Срок запуска и бюджет"
@@ -227,7 +248,7 @@ async def cb_brief(c: CallbackQuery):
 async def cb_gift(c: CallbackQuery):
     path = os.path.join(os.path.dirname(__file__), "assets", "checklist-7-screens.txt")
     try:
-        await bot.send_document(c.from_user.id, FSInputFile(path), caption="🎁 Чек‑лист: 7 экранов демо‑бота, которые продают")
+        await bot.send_document(c.from_user.id, FSInputFile(path), caption="🎁 Чек-лист: 7 экранов демо-бота, которые продают")
         await c.answer("Отправил подарок в личку.")
     except Exception:
         await c.answer("Не удалось отправить файл. Напишите в личку.", show_alert=True)
@@ -300,7 +321,7 @@ async def order_contact_text(m: Message, state: FSMContext):
     phone = sanitize_phone(m.text)
     await finalize_order(m, state, phone=phone, raw=m.text)
 
-async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], raw: Optional[str]=None):
+async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], raw: Optional[str] = None):
     await state.clear()
     Store.stats["orders"] += 1
     clean = phone or (raw.strip() if raw else "—")
@@ -314,53 +335,16 @@ async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], ra
     )
     await notify_admin(at)
 
-# --- Админ ---
-@dp.callback_query(F.data == "admin_open")
-async def admin_open(c: CallbackQuery):
-    if c.from_user.id != ADMIN_CHAT_ID:
-        return await c.answer("Доступ только владельцу", show_alert=True)
-    await c.message.edit_text("Админ‑панель:", reply_markup=admin_kb())
-    await c.answer()
-
-@dp.callback_query(F.data == "admin_toggle")
-async def admin_toggle(c: CallbackQuery):
-    if c.from_user.id != ADMIN_CHAT_ID:
-        return await c.answer("Нет доступа", show_alert=True)
-    Store.accepting = not Store.accepting
-    await c.message.edit_text("Админ‑панель:", reply_markup=admin_kb())
-    await c.answer("Режим приёма: " + ("включён" if Store.accepting else "выключен"))
-
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats(c: CallbackQuery):
-    if c.from_user.id != ADMIN_CHAT_ID:
-        return await c.answer("Нет доступа", show_alert=True)
-    s = Store.stats
-    txt = f"Статистика:\n/starts: {s['starts']}\n/quiz: {s['quiz']}\n/orders: {s['orders']}"
-    await c.message.edit_text(txt, reply_markup=admin_kb())
-    await c.answer()
-
-@dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast(c: CallbackQuery):
-    if c.from_user.id != ADMIN_CHAT_ID:
-        return await c.answer("Нет доступа", show_alert=True)
-    await notify_admin("📣 Тест‑рассылка: сервисное сообщение для владельца бота.")
-    await c.answer("Отправил тест‑сообщение в ваш личный чат.")
-
-# --- Errors ---
-@dp.error()
-async def on_error(event, exception):
-    try:
-        await notify_admin(f"⚠️ Ошибка: {exception}")
-    except Exception:
-        pass
-    logging.exception("Handler error: %s", exception)
-
-# ---- FastAPI / webhook ----
+# --- FastAPI app ---
 app = FastAPI(title="Vimly — Client Demo Bot")
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return f"<h3>{BRAND_NAME} — {BRAND_TAGLINE}</h3>"
+
+@app.get("/healthz", response_class=PlainTextResponse)
+async def healthz():
+    return "ok"
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
@@ -373,13 +357,23 @@ async def webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
+# --- lifecycle ---
 @app.on_event("startup")
 async def on_startup():
     if MODE == "webhook":
         if BASE_URL:
             url = f"{BASE_URL}{WEBHOOK_PATH}"
-            await bot.set_webhook(url=url, secret_token=WEBHOOK_SECRET or None, drop_pending_updates=True)
-            log.info("Webhook set: %s", url)
+            log.info("Setting webhook to: %r", url)
+            try:
+                await bot.set_webhook(
+                    url=url,
+                    secret_token=WEBHOOK_SECRET or None,
+                    drop_pending_updates=True
+                )
+                log.info("Webhook set OK")
+            except Exception as e:
+                # Не валим приложение — просто лог
+                log.error("Failed to set webhook: %s", e)
         else:
             log.warning("BASE_URL is not set; webhook not configured")
     else:
@@ -392,7 +386,7 @@ async def on_shutdown():
     except Exception:
         pass
 
-# ---- Local polling (for dev) ----
+# ---- Local polling (dev) ----
 if __name__ == "__main__":
     async def _run():
         log.info("Starting polling...")
