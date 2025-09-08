@@ -1,18 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-Vimly — Client Demo Bot
-Стек: FastAPI + aiogram v3, один файл, без БД.
-Режимы: webhook (Render) или polling (локально).
-
-Меню:
-• Процесс • Кейсы (демо) • Квиз‑заявка • Пакеты и цены • Заказать • Контакты • Бриф • Подарок
-
-Фичи:
-• Квиз (3 шага) и «Заказать» → заявка в админ‑чат
-• Админ‑панель: вкл/выкл приёма, статистика, тест‑рассылка
-• Отдача файла‑подарка (чек‑лист) из папки /assets
-• Брендинг из ENV с дефолтом под "Vimly"
-"""
+# --- imports ---
 import os, logging, re, asyncio
 from datetime import datetime, timezone
 from typing import Optional
@@ -26,12 +12,12 @@ from aiogram.types import (
     Message, CallbackQuery, Update,
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    FSInputFile
+    FSInputFile,
 )
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
-# ---- ENV ----
+# --- env ---
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -46,9 +32,9 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0") or "0")
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram/webhook/vimly")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-MODE = os.getenv("MODE", "webhook").lower()  # webhook | polling
+MODE = os.getenv("MODE", "webhook").lower()
 
-# --- Branding defaults (can be overridden by ENV) ---
+# --- branding ---
 BRAND_NAME = os.getenv("BRAND_NAME", "Vimly").strip()
 BRAND_TAGLINE = os.getenv("BRAND_TAGLINE", "Боты, которые продают").strip()
 BRAND_TG = os.getenv("BRAND_TG", "@Vimly_bot").strip()
@@ -57,6 +43,7 @@ BRAND_SITE = os.getenv("BRAND_SITE", "").strip()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("vimly-demo")
 
+# --- aiogram 3.7+ init: bot + dp (ДОЛЖНО БЫТЬ ДО ХЕНДЛЕРОВ) ---
 try:
     from aiogram.client.default import DefaultBotProperties
     from aiogram.enums import ParseMode
@@ -64,6 +51,9 @@ try:
 except Exception:
     # fallback для aiogram < 3.7
     bot = Bot(BOT_TOKEN)
+
+dp = Dispatcher()  # <<< ВАЖНО: объявлен ДО всех @dp.message / @dp.callback_query
+
 
 # ---- STORE (in-memory demo) ----
 class Store:
