@@ -57,8 +57,13 @@ BRAND_SITE = os.getenv("BRAND_SITE", "").strip()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("vimly-demo")
 
-bot = Bot(BOT_TOKEN, parse_mode="Markdown")
-dp = Dispatcher()
+try:
+    from aiogram.client.default import DefaultBotProperties
+    from aiogram.enums import ParseMode
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+except Exception:
+    # fallback для aiogram < 3.7
+    bot = Bot(BOT_TOKEN)
 
 # ---- STORE (in-memory demo) ----
 class Store:
