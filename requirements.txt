@@ -1,4 +1,4 @@
-aiogram>=3.3,<4.0
+aiogram>=3.7,<4.0
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-dotenv>=1.0
