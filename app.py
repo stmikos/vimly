@@ -8,7 +8,7 @@ Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
 - «🧪 Квиз-заявка» сразу открывает WebApp (fallback — чат-квиз)
 - «↘ Скрыть меню» — сворачивает клавиатуру
 - safe_edit: корректно редактирует caption/text
-- Лиды в ADMIN + LEADS_CHAT (поддержка тем через LEADS_THREAD_ID) с явной диагностикой
+- Лиды в ADMIN + LEADS_CHAT (поддержка тем через LEADS_THREAD_ID) с диагностикой
 - Диагностика: /check_leads, /test_leads, /chatid, /threadid
 - 🎁 Подарок: PDF чек-лист + промокод −20% на 72 часа
 - Статика /webapp/quiz/ (+favicon), резервная встроенная HTML-форма
@@ -126,34 +126,39 @@ def parse_leads_target(s: str):
     except ValueError:
         return None
 
-async def _send_to_leads(text: str):
-    """Отправка в лид-чат с thread (если задан). Ошибку шлём админу и логируем."""
+async def _send_to_leads(text: str) -> bool:
+    """Постит в лид-чат. Возвращает True при успехе, False при ошибке."""
     target = parse_leads_target(LEADS_RAW)
     if not target:
-        return
+        return False
     try:
         kwargs = {}
         if LEADS_THREAD_ID:
             kwargs["message_thread_id"] = LEADS_THREAD_ID
         await bot.send_message(target, text, **kwargs)
         log.info("Lead routed to %r (thread=%s)", LEADS_RAW, LEADS_THREAD_ID or "—")
+        return True
     except Exception as e:
         log.warning("notify_leads failed: %s", e)
         if ADMIN_CHAT_ID:
             try:
-                await bot.send_message(ADMIN_CHAT_ID, f"⚠️ Не удалось отправить в лид-чат {LEADS_RAW!r}:\n<code>{esc(str(e))}</code>")
+                await bot.send_message(
+                    ADMIN_CHAT_ID,
+                    f"⚠️ Не удалось отправить в лид-чат {LEADS_RAW!r}:\n<code>{esc(str(e))}</code>"
+                )
             except Exception:
                 pass
+        return False
 
-async def notify_admin(text: str):
-    # Личка владельца
+async def notify_admin(text: str) -> bool:
+    # Личка владельца (всегда пробуем)
     if ADMIN_CHAT_ID:
         try:
             await bot.send_message(ADMIN_CHAT_ID, text, disable_notification=True)
         except Exception as e:
             log.warning("notify_admin failed: %s", e)
-    # Лид-чат/канал
-    await _send_to_leads(text)
+    # Возвращаем результат доставки в лид-чат
+    return await _send_to_leads(text)
 
 async def safe_edit(c: CallbackQuery, html_text: str, kb: Optional[InlineKeyboardMarkup] = None):
     """Редактируем caption/text по типу сообщения; если нельзя — отправляем новое."""
@@ -179,6 +184,50 @@ def gen_promo_for(user_id: int) -> dict:
     Store.promos[user_id] = data
     return data
 
+MAX_TG = 3900  # запас от лимита 4096
+def build_lead(kind: str, m: Message, company: str, task: str, contact: str) -> str:
+    """Собирает текст лида и подрезает company/task, если слишком длинные."""
+    base_head = f"🧪 Заявка ({kind})\nОт: {ufmt(m)}\n"
+    comp = (company or "").strip()
+    tsk  = (task or "").strip()
+    cnt  = (contact or "").strip()
+    body = (
+        f"Компания: {esc(comp) or '—'}\n"
+        f"Задача: {esc(tsk) or '—'}\n"
+        f"Контакт: {esc(cnt) or '—'}\n"
+        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    )
+    txt = base_head + body
+    if len(txt) <= MAX_TG:
+        return txt
+
+    comp_max = max(150, int((MAX_TG - len(base_head) - 100) * 0.45))
+    tsk_max  = max(150, int((MAX_TG - len(base_head) - 100) * 0.45))
+    def cut(s: str, n: int) -> str:
+        s = s.strip()
+        return (s[: n-1] + "…") if len(s) > n else s
+    comp_cut = cut(comp, comp_max)
+    tsk_cut  = cut(tsk,  tsk_max)
+    body2 = (
+        f"Компания: {esc(comp_cut) or '—'}\n"
+        f"Задача: {esc(tsk_cut) or '—'}\n"
+        f"Контакт: {esc(cnt) or '—'}\n"
+        f"(обрезано)\n"
+        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    )
+    txt2 = base_head + body2
+    if len(txt2) > MAX_TG:
+        tsk_cut = cut(tsk_cut, max(120, tsk_max - (len(txt2) - MAX_TG + 20)))
+        body2 = (
+            f"Компания: {esc(comp_cut) or '—'}\n"
+            f"Задача: {esc(tsk_cut) or '—'}\n"
+            f"Контакт: {esc(cnt) or '—'}\n"
+            f"(обрезано)\n"
+            f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+        )
+        txt2 = base_head + body2
+    return txt2
+
 # ---------- UI ----------
 def main_kb() -> InlineKeyboardMarkup:
     rows = [
@@ -191,8 +240,7 @@ def main_kb() -> InlineKeyboardMarkup:
                 text="🧪 Квиз-заявка",
                 web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/")
             ) if BASE_URL else InlineKeyboardButton(
-                text="🧪 Квиз-заявка (в чате)",
-                callback_data="go_quiz"
+                text="🧪 Квиз-заявка (в чате)", callback_data="go_quiz"
             ),
             InlineKeyboardButton(text="💸 Пакеты и цены", callback_data="go_prices"),
         ],
@@ -204,12 +252,8 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📝 Бриф (7 вопросов)", callback_data="go_brief"),
             InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift"),
         ],
-        [
-            InlineKeyboardButton(text="↘ Скрыть меню", callback_data="hide_menu"),
-        ],
-        [
-            InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open"),
-        ],
+        [InlineKeyboardButton(text="↘ Скрыть меню", callback_data="hide_menu")],
+        [InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -230,13 +274,11 @@ def admin_kb() -> InlineKeyboardMarkup:
 @dp.message(CommandStart())
 async def on_start(m: Message):
     Store.stats["starts"] += 1
-    # 1) hero
     hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
     try:
         await m.answer_photo(FSInputFile(hero), caption=header())
     except Exception:
         pass
-    # 2) текст + меню
     await m.answer("Демо-бот: квиз, кейсы, запись. Нажмите кнопку ниже 👇", reply_markup=main_kb())
 
 @dp.message(Command("menu"))
@@ -248,6 +290,40 @@ async def on_admin(m: Message):
     if m.from_user.id != ADMIN_CHAT_ID:
         return await m.answer("Админ-панель доступна владельцу бота.")
     await m.answer("Админ-панель:", reply_markup=admin_kb())
+
+@dp.callback_query(F.data == "admin_open")
+async def cb_admin_open(c: CallbackQuery):
+    if c.from_user.id != ADMIN_CHAT_ID:
+        await c.answer("Только владелец бота", show_alert=True)
+        return
+    await safe_edit(c, "Админ-панель:", admin_kb()); await c.answer()
+
+@dp.callback_query(F.data == "admin_toggle")
+async def cb_admin_toggle(c: CallbackQuery):
+    if c.from_user.id != ADMIN_CHAT_ID:
+        return await c.answer("Нет доступа", show_alert=True)
+    Store.accepting = not Store.accepting
+    await safe_edit(c, f"Приём заявок: {'включен 🟢' if Store.accepting else 'выключен 🔴'}", admin_kb())
+    await c.answer()
+
+@dp.callback_query(F.data == "admin_stats")
+async def cb_admin_stats(c: CallbackQuery):
+    if c.from_user.id != ADMIN_CHAT_ID:
+        return await c.answer("Нет доступа", show_alert=True)
+    s = Store.stats
+    txt = (f"📈 Статистика:\n"
+           f"• Стартов: {s['starts']}\n"
+           f"• Квиз (чат): {s['quiz']}\n"
+           f"• Квиз (WebApp): {s['webquiz']}\n"
+           f"• Заказы (контакт): {s['orders']}")
+    await safe_edit(c, txt, admin_kb()); await c.answer()
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def cb_admin_broadcast(c: CallbackQuery):
+    if c.from_user.id != ADMIN_CHAT_ID:
+        return await c.answer("Нет доступа", show_alert=True)
+    await c.message.answer("Броадкаст-демо: рассылка пока не настроена.")
+    await c.answer()
 
 @dp.message(Command("chatid"))
 async def cmd_chatid(m: Message):
@@ -513,21 +589,18 @@ async def on_webapp_data(m: Message):
         data = json.loads(raw)
     except Exception:
         data = {"raw": raw}
-    comp = (data.get("company") or "").strip()[:2000]
-    task = (data.get("task") or "").strip()[:2000]
-    contact = (data.get("contact") or "").strip()[:200]
 
-    txt = (
-        "🧪 Заявка (WebApp)\n"
-        f"От: {ufmt(m)}\n"
-        f"Компания: {esc(comp) or '—'}\n"
-        f"Задача: {esc(task) or '—'}\n"
-        f"Контакт: {esc(contact) or '—'}\n"
-        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
-    )
-    # Отправляем и админу, и в лид-чат (с диагностикой внутри)
-    await notify_admin(txt)
-    await m.answer("Спасибо! Ваша заявка отправлена. Мы на связи.", reply_markup=main_kb())
+    comp    = (data.get("company") or "").strip()[:20000]
+    task    = (data.get("task") or "").strip()[:20000]
+    contact = (data.get("contact") or "").strip()[:500]
+
+    txt = build_lead("WebApp", m, comp, task, contact)
+    delivered = await notify_admin(txt)  # админу + лид-чат
+    if delivered:
+        ack = "Спасибо! Заявка отправлена ✅\n(доставлено в лид-чат и админу)"
+    else:
+        ack = "Спасибо! Заявка отправлена ✅\n⚠️ Лид-чат временно недоступен — админ уже уведомлён."
+    await m.answer(ack, reply_markup=main_kb())
 
 # --- Заказ (контакт) ---
 @dp.callback_query(F.data == "go_order")
@@ -589,8 +662,7 @@ FALLBACK_QUIZ_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Квиз-заявка</title>
 <style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;
-margin:0;padding:20px}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;margin:0;padding:20px}
 .card{max-width:640px;margin:0 auto;padding:20px;border:1px solid #eee;border-radius:16px}
 label{display:block;margin:12px 0 6px;font-weight:600}
 input,textarea{width:100%;padding:10px;border:1px solid #ccc;border-radius:10px}
