@@ -2,13 +2,16 @@
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
 
-Фишки:
-- HTML parse mode (устраняет ошибки Markdown)
-- /start: hero-картинка отдельно, меню отдельным текстом
+Функции:
+- HTML parse mode (без Markdown-глюков)
+- /start: hero-картинка отдельно, меню отдельным сообщением
+- Кнопка «🧪 Квиз-заявка» сразу открывает WebApp-форму
+- «↘ Скрыть меню» скрывает клавиатуру
 - safe_edit: корректно редактирует caption/text
-- WebApp-квиз: /webapp/quiz/ (+раздача статики, favicon)
 - Лиды: ADMIN_CHAT_ID и LEADS_CHAT_ID (+ LEADS_THREAD_ID для групп с Темами)
-- Диагностика: /chatid, /threadid, /test_leads
+- Диагностика: /check_leads, /test_leads, /chatid, /threadid
+- Статика WebApp: /webapp/quiz/ (+favicon)
+- HEAD-роуты, чтобы убрать 405
 """
 
 import os, logging, re, asyncio, json, html
@@ -161,7 +164,14 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💼 Кейсы (демо)", callback_data="go_cases"),
         ],
         [
-            InlineKeyboardButton(text="🧪 Квиз-заявка", callback_data="go_quiz"),
+            # Квиз открывает WebApp сразу (если BASE_URL задан)
+            InlineKeyboardButton(
+                text="🧪 Квиз-заявка",
+                web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/")
+            ) if BASE_URL else InlineKeyboardButton(
+                text="🧪 Квиз-заявка (в чате)",
+                callback_data="go_quiz"  # fallback, если BASE_URL не задан
+            ),
             InlineKeyboardButton(text="💸 Пакеты и цены", callback_data="go_prices"),
         ],
         [
@@ -172,12 +182,13 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📝 Бриф (7 вопросов)", callback_data="go_brief"),
             InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift"),
         ],
+        [
+            InlineKeyboardButton(text="↘ Скрыть меню", callback_data="hide_menu"),
+        ],
+        [
+            InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open"),
+        ],
     ]
-    if BASE_URL:
-        rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз", web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/"))])
-    else:
-        rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз (скоро)", callback_data="go_webapp_na")])
-    rows.append([InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def admin_kb() -> InlineKeyboardMarkup:
@@ -197,16 +208,17 @@ def admin_kb() -> InlineKeyboardMarkup:
 @dp.message(CommandStart())
 async def on_start(m: Message):
     Store.stats["starts"] += 1
+    # 1) hero (без кнопок)
     hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
     try:
         await m.answer_photo(FSInputFile(hero), caption=header())
     except Exception:
         pass
-    welcome = (
-        "Этот бот — <b>демо для клиентов</b>: меню, кейсы, квиз и запись в 2 клика.\n"
-        "Нажмите кнопку ниже 👇"
+    # 2) короткий текст + клавиатура
+    await m.answer(
+        "Демо-бот: квиз, кейсы, запись. Нажмите кнопку ниже 👇",
+        reply_markup=main_kb()
     )
-    await m.answer(welcome, reply_markup=main_kb())
 
 @dp.message(Command("menu"))
 async def on_menu(m: Message):
@@ -236,11 +248,57 @@ async def channel_threadid(m: Message):
     tid = getattr(m, "message_thread_id", None)
     await m.answer(f"thread_id: <code>{tid}</code>")
 
+# --- Диагностика лида-чата ---
+@dp.message(Command("check_leads"))
+async def check_leads(m: Message):
+    target_raw = LEADS_RAW
+
+    def _parse(s: str):
+        s = (s or "").strip()
+        if not s: return None
+        if s.startswith("@"): return s
+        try: return int(s)
+        except ValueError: return None
+
+    target = _parse(target_raw)
+    if not target:
+        return await m.answer("LEADS_CHAT_ID не задан или некорректен.")
+
+    try:
+        me = await bot.get_me()
+        chat = await bot.get_chat(target)
+        member = await bot.get_chat_member(chat.id, me.id)
+
+        def g(obj, attr, default="—"):
+            return getattr(obj, attr, default)
+
+        info = (
+            "📊 Лид-чат найден:\n"
+            f"• chat.id: <code>{chat.id}</code>\n"
+            f"• type: {g(chat, 'type')}\n"
+            f"• title: {g(chat, 'title')}\n"
+            f"• is_forum: {g(chat, 'is_forum', False)}\n"
+            f"• бот в чате как: {g(member, 'status')}\n"
+            f"• can_send_messages: {g(member, 'can_send_messages', '—')}\n"
+            f"• can_post_messages (для каналов): {g(member, 'can_post_messages', '—')}\n"
+        )
+        await m.answer(info)
+    except Exception as e:
+        await m.answer(f"❌ Не удалось прочитать чат {target_raw!r}:\n<code>{e}</code>")
+
 @dp.message(Command("test_leads"))
 async def test_leads_cmd(m: Message):
     if m.from_user.id != ADMIN_CHAT_ID:
         return
-    target = parse_leads_target(LEADS_RAW)
+
+    def _parse(s: str):
+        s = (s or "").strip()
+        if not s: return None
+        if s.startswith("@"): return s
+        try: return int(s)
+        except ValueError: return None
+
+    target = _parse(LEADS_RAW)
     if not target:
         return await m.answer("LEADS_CHAT_ID не задан или некорректен.")
     try:
@@ -250,11 +308,19 @@ async def test_leads_cmd(m: Message):
         await bot.send_message(target, "🔔 Тест в чат лидов: работает ✅", **kwargs)
         await m.answer(f"OK → {LEADS_RAW!r} (thread={LEADS_THREAD_ID or '—'})")
     except Exception as e:
-        await m.answer(f"Не отправилось в {LEADS_RAW!r}:\n<code>{e}</code>")
+        await m.answer(f"❌ Не отправилось в {LEADS_RAW!r}:\n<code>{e}</code>")
 
-@dp.callback_query(F.data == "go_webapp_na")
-async def cb_webapp_na(c: CallbackQuery):
-    await c.answer("Веб-форма включится после настройки BASE_URL.", show_alert=True)
+@dp.callback_query(F.data == "hide_menu")
+async def cb_hide_menu(c: CallbackQuery):
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    try:
+        await c.message.edit_text("Меню скрыто. Напишите /menu чтобы открыть.")
+    except TelegramBadRequest:
+        await c.message.answer("Меню скрыто. Напишите /menu чтобы открыть.")
+    await c.answer()
 
 @dp.callback_query(F.data == "go_menu")
 async def cb_menu(c: CallbackQuery):
@@ -319,7 +385,7 @@ async def cb_brief(c: CallbackQuery):
     )
     await safe_edit(c, brief); await c.answer()
 
-# --- Классический квиз в чате ---
+# --- Fallback: классический квиз в чате (если BASE_URL не задан) ---
 @dp.callback_query(F.data == "go_quiz")
 async def quiz_start(c: CallbackQuery, state: FSMContext):
     if not Store.accepting:
@@ -420,7 +486,7 @@ async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], ra
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     ))
 
-# --- Error handler (aiogram 3.7+ ожидает один аргумент event) ---
+# --- Error handler (aiogram 3.7+: один аргумент event) ---
 @dp.error()
 async def on_error(event):
     exc = getattr(event, "exception", None)
