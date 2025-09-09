@@ -164,6 +164,27 @@ def admin_kb() -> InlineKeyboardMarkup:
     ])
 
 # ---------- HANDLERS ----------
+# === Диагностика чата/канала ===
+
+# 1) Команда покажет ID текущего чата (работает и в группе/канале)
+@dp.message(Command("chatid"))
+async def chat_id_cmd(m: Message):
+    # Включи бота в группу и пришли /chatid — бот ответит реальным chat.id
+    await m.answer(f"chat_id: <code>{m.chat.id}</code>")
+
+# 2) Тестовая отправка в LEADS_CHAT_ID (только для админа)
+@dp.message(Command("test_leads"))
+async def test_leads_cmd(m: Message):
+    if m.from_user.id != ADMIN_CHAT_ID:
+        return
+    if not LEADS_CHAT_ID:
+        return await m.answer("LEADS_CHAT_ID не задан.")
+    try:
+        await bot.send_message(LEADS_CHAT_ID, "🔔 Тестовая отправка в чат лидов: работает ✅")
+        await m.answer("Ок. Сообщение в чат лидов отправлено.")
+    except Exception as e:
+        await m.answer(f"Не удалось отправить в чат лидов: <code>{e}</code>")
+
 @dp.message(CommandStart())
 async def on_start(m: Message):
     Store.stats["starts"] += 1
