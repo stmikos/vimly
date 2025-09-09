@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
-Правки:
-- Перешёл на HTML parse mode (устраняет ошибки Markdown с подчёркиваниями и т.п.)
-- Безопасное редактирование сообщений (edit_text vs edit_caption)
-- /start: картинка отдельно, меню отдельным текстом (как ты просил)
-- WebApp-квиз остаётся
+- HTML parse mode (без Markdown-ошибок)
+- /start: hero-картинка отдельно, меню отдельным текстом
+- safe_edit: редактирует caption/text корректно
+- WebApp-квиз + статика /webapp/quiz/ и /favicon.ico
 """
 
-# --- imports ---
 import os, logging, re, asyncio, json, html
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from aiogram import Bot, Dispatcher, F
@@ -28,8 +26,10 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
-# --- env ---
+# ---------- ENV ----------
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -56,28 +56,26 @@ WEBHOOK_PATH = _norm_path(os.getenv("WEBHOOK_PATH") or "/telegram/webhook/vimly"
 WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
 MODE = (os.getenv("MODE") or "webhook").strip().lower()  # webhook | polling
 
-# --- branding ---
+# ---------- BRAND ----------
 BRAND_NAME = (os.getenv("BRAND_NAME") or "Vimly").strip()
 BRAND_TAGLINE = (os.getenv("BRAND_TAGLINE") or "Боты, которые продают").strip()
 BRAND_TG = (os.getenv("BRAND_TG") or "@Vimly_bot").strip()
 BRAND_SITE = (os.getenv("BRAND_SITE") or "").strip()
 
-# --- logging ---
+# ---------- LOG ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("vimly-webapp-demo")
 
-# --- aiogram 3.7+ init: HTML parse mode ---
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+# ---------- AIOGRAM ----------
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()  # объявлен до хендлеров
+dp = Dispatcher()
 
-# ---- STORE ----
+# ---------- STORE ----------
 class Store:
     accepting = True
     stats = {"starts": 0, "quiz": 0, "orders": 0, "webquiz": 0}
 
-# ---- FSM ----
+# ---------- FSM ----------
 class Quiz(StatesGroup):
     niche = State()
     goal = State()
@@ -86,7 +84,7 @@ class Quiz(StatesGroup):
 class Order(StatesGroup):
     contact = State()
 
-# ---- helpers ----
+# ---------- HELPERS ----------
 def esc(s: Optional[str]) -> str:
     return html.escape(s or "", quote=False)
 
@@ -113,8 +111,8 @@ async def notify_admin(text: str):
         except Exception as e:
             log.warning("notify_leads failed: %s", e)
 
-async def safe_edit(c: CallbackQuery, html_text: str, kb: InlineKeyboardMarkup | None = None):
-    """Акуратно редактируем: если сообщение было медиа — меняем подпись; если нельзя — шлём новое."""
+async def safe_edit(c: CallbackQuery, html_text: str, kb: Optional[InlineKeyboardMarkup] = None):
+    """Редактируем caption/text по типу сообщения; если нельзя — отправляем новое."""
     kb = kb or main_kb()
     m = c.message
     try:
@@ -125,7 +123,7 @@ async def safe_edit(c: CallbackQuery, html_text: str, kb: InlineKeyboardMarkup |
     except TelegramBadRequest:
         await m.answer(html_text, reply_markup=kb)
 
-# ---- UI ----
+# ---------- UI ----------
 def main_kb() -> InlineKeyboardMarkup:
     rows = [
         [
@@ -145,13 +143,8 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift"),
         ],
     ]
-   # где формируется меню
-if BASE_URL:
-    rows.append([InlineKeyboardButton(
-        text="🧪 WebApp-квиз",
-        web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/")  # <-- слэш!
-    )])
-
+    if BASE_URL:
+        rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз", web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/"))])  # со слэшем!
     else:
         rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз (скоро)", callback_data="go_webapp_na")])
     rows.append([InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open")])
@@ -170,17 +163,15 @@ def admin_kb() -> InlineKeyboardMarkup:
         ]
     ])
 
-# ---- HANDLERS ----
+# ---------- HANDLERS ----------
 @dp.message(CommandStart())
 async def on_start(m: Message):
     Store.stats["starts"] += 1
-    # 1) hero (без кнопок)
     hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
     try:
         await m.answer_photo(FSInputFile(hero), caption=header())
     except Exception:
         pass
-    # 2) текст + клавиатура (редактируем дальше)
     welcome = (
         "Этот бот — <b>демо для клиентов</b>: меню, кейсы, квиз и запись в 2 клика.\n"
         "Нажмите кнопку ниже 👇"
@@ -264,7 +255,7 @@ async def cb_brief(c: CallbackQuery):
     )
     await safe_edit(c, brief); await c.answer()
 
-# --- Классический квиз (в чате) ---
+# --- Классический квиз в чате ---
 @dp.callback_query(F.data == "go_quiz")
 async def quiz_start(c: CallbackQuery, state: FSMContext):
     if not Store.accepting:
@@ -330,7 +321,7 @@ async def on_webapp_data(m: Message):
     await notify_admin(txt)
     await m.answer("Спасибо! Ваша заявка отправлена. Мы на связи.", reply_markup=main_kb())
 
-# --- Заказ (контакт в один шаг) ---
+# --- Заказ (контакт) ---
 @dp.callback_query(F.data == "go_order")
 async def order_start(c: CallbackQuery, state: FSMContext):
     if not Store.accepting:
@@ -365,7 +356,7 @@ async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], ra
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     ))
 
-# --- Error handler (aiogram 3.7+: один аргумент event) ---
+# --- Error handler (aiogram 3.7+ ожидает один аргумент event) ---
 @dp.error()
 async def on_error(event):
     exc = getattr(event, "exception", None)
@@ -375,13 +366,30 @@ async def on_error(event):
         pass
     logging.exception("Handler error: %s", exc)
 
-# --- FastAPI app ---
+# ---------- FASTAPI ----------
 app = FastAPI(title="Vimly — Client Demo Bot (WebApp)")
 
-# Static for webapp
-static_dir = os.path.join(os.path.dirname(__file__), "webapp")
-if os.path.isdir(static_dir):
-    app.mount("/webapp", StaticFiles(directory=static_dir), name="webapp")
+# статика WebApp (html=True раздаёт index.html в папках)
+STATIC_ROOT = os.path.join(os.path.dirname(__file__), "webapp")
+if os.path.isdir(STATIC_ROOT):
+    app.mount("/webapp", StaticFiles(directory=STATIC_ROOT, html=True), name="webapp")
+
+# явный роут (работает и без завершающего /)
+@app.get("/webapp/quiz", response_class=HTMLResponse)
+@app.get("/webapp/quiz/", response_class=HTMLResponse)
+async def webapp_quiz():
+    index_path = os.path.join(STATIC_ROOT, "quiz", "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path, media_type="text/html")
+    raise HTTPException(status_code=404, detail="webapp/quiz not found")
+
+# фавикон (чтобы не было 404)
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
+    if os.path.exists(hero):
+        return FileResponse(hero, media_type="image/png")
+    return Response(status_code=204)
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -390,21 +398,6 @@ async def index():
 @app.get("/healthz", response_class=PlainTextResponse)
 async def healthz():
     return "ok"
-# ЯВНЫЙ роут на /webapp/quiz (работает и без слэша)
-@app.get("/webapp/quiz", response_class=HTMLResponse)
-async def webapp_quiz():
-    index_path = os.path.join(static_dir, "quiz", "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path, media_type="text/html")
-    raise HTTPException(status_code=404, detail="webapp/quiz not found")
-
-# Фавиконка, чтобы убрать 404 (можно вернуть hero как иконку)
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
-    if os.path.exists(hero):
-        return FileResponse(hero, media_type="image/png")
-    return Response(status_code=204)
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
@@ -417,7 +410,7 @@ async def webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
-# --- lifecycle ---
+# ---------- LIFECYCLE ----------
 @app.on_event("startup")
 async def on_startup():
     if MODE == "webhook":
@@ -425,11 +418,7 @@ async def on_startup():
             url = f"{BASE_URL}{WEBHOOK_PATH}"
             log.info("Setting webhook to: %r", url)
             try:
-                await bot.set_webhook(
-                    url=url,
-                    secret_token=WEBHOOK_SECRET or None,
-                    drop_pending_updates=True
-                )
+                await bot.set_webhook(url=url, secret_token=WEBHOOK_SECRET or None, drop_pending_updates=True)
                 log.info("Webhook set OK")
             except Exception as e:
                 log.error("Failed to set webhook: %s", e)
@@ -445,7 +434,7 @@ async def on_shutdown():
     except Exception:
         pass
 
-# ---- Local polling (dev) ----
+# ---------- LOCAL POLLING ----------
 if __name__ == "__main__":
     async def _run():
         log.info("Starting polling...")
