@@ -314,12 +314,16 @@ async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], ra
 
 # --- Errors ---
 @dp.error()
-async def on_error(event, exception):
+async def on_error(event):
+    # aiogram 3.7+: сюда прилетает объект события, а исключение лежит в event.exception
+    exc = getattr(event, "exception", None)
     try:
-        await notify_admin(f"⚠️ Ошибка: {exception}")
+        await notify_admin(f"⚠️ Ошибка: {repr(exc)}")
     except Exception:
         pass
-    logging.exception("Handler error: %s", exception)
+    # подробный лог в консоль/логи Render
+    import logging
+    logging.exception("Handler error: %s", exc)
 
 # ---- FastAPI app ----
 app = FastAPI(title="Vimly — Client Demo Bot (WebApp)")
