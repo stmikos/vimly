@@ -2,20 +2,21 @@
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
 
-Функции:
-- HTML parse mode (без Markdown-глюков)
+Включено:
+- HTML parse mode (устраняет markdown-ошибки)
 - /start: hero-картинка отдельно, меню отдельным сообщением
-- Кнопка «🧪 Квиз-заявка» сразу открывает WebApp-форму
-- «↘ Скрыть меню» скрывает клавиатуру
+- «🧪 Квиз-заявка» сразу открывает WebApp (fallback — чат-квиз)
+- «↘ Скрыть меню» — сворачивает клавиатуру
 - safe_edit: корректно редактирует caption/text
-- Лиды: ADMIN_CHAT_ID и LEADS_CHAT_ID (+ LEADS_THREAD_ID для групп с Темами)
+- Лиды в ADMIN + LEADS_CHAT (поддержка тем через LEADS_THREAD_ID) с явной диагностикой
 - Диагностика: /check_leads, /test_leads, /chatid, /threadid
-- Статика WebApp: /webapp/quiz/ (+favicon)
-- HEAD-роуты, чтобы убрать 405
+- 🎁 Подарок: PDF чек-лист + промокод −20% на 72 часа
+- Статика /webapp/quiz/ (+favicon), резервная встроенная HTML-форма
+- HEAD-роуты для пингов Render
 """
 
-import os, logging, re, asyncio, json, html
-from datetime import datetime, timezone
+import os, logging, re, asyncio, json, html, secrets
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, Response
@@ -57,7 +58,7 @@ if not BOT_TOKEN:
 
 ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
 
-# Лид-чат: можно задать числовой ID (-100...) или @username канала
+# Лид-чат: можно -100… (группа/канал) или @channelusername (канал)
 LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()
 LEADS_THREAD_ID = int((os.getenv("LEADS_THREAD_ID") or "0").strip() or "0")
 
@@ -85,6 +86,10 @@ dp = Dispatcher()
 class Store:
     accepting = True
     stats = {"starts": 0, "quiz": 0, "orders": 0, "webquiz": 0}
+
+# Подарки/промо (in-memory)
+Store.promos = {}           # user_id -> {"code": str, "expires_utc": str}
+Store.gift_claimed = set()  # user_id
 
 # ---------- FSM ----------
 class Quiz(StatesGroup):
@@ -117,9 +122,28 @@ def parse_leads_target(s: str):
     if s.startswith("@"):
         return s  # username канала
     try:
-        return int(s)  # числовой id группы/канала (-100…)
+        return int(s)  # числовой id (-100…)
     except ValueError:
         return None
+
+async def _send_to_leads(text: str):
+    """Отправка в лид-чат с thread (если задан). Ошибку шлём админу и логируем."""
+    target = parse_leads_target(LEADS_RAW)
+    if not target:
+        return
+    try:
+        kwargs = {}
+        if LEADS_THREAD_ID:
+            kwargs["message_thread_id"] = LEADS_THREAD_ID
+        await bot.send_message(target, text, **kwargs)
+        log.info("Lead routed to %r (thread=%s)", LEADS_RAW, LEADS_THREAD_ID or "—")
+    except Exception as e:
+        log.warning("notify_leads failed: %s", e)
+        if ADMIN_CHAT_ID:
+            try:
+                await bot.send_message(ADMIN_CHAT_ID, f"⚠️ Не удалось отправить в лид-чат {LEADS_RAW!r}:\n<code>{esc(str(e))}</code>")
+            except Exception:
+                pass
 
 async def notify_admin(text: str):
     # Личка владельца
@@ -129,16 +153,7 @@ async def notify_admin(text: str):
         except Exception as e:
             log.warning("notify_admin failed: %s", e)
     # Лид-чат/канал
-    target = parse_leads_target(LEADS_RAW)
-    if target:
-        try:
-            kwargs = {}
-            if LEADS_THREAD_ID:
-                kwargs["message_thread_id"] = LEADS_THREAD_ID
-            await bot.send_message(target, text, **kwargs)
-            log.info("Lead routed to %r (thread=%s)", LEADS_RAW, LEADS_THREAD_ID or "—")
-        except Exception as e:
-            log.warning("notify_leads failed: %s", e)
+    await _send_to_leads(text)
 
 async def safe_edit(c: CallbackQuery, html_text: str, kb: Optional[InlineKeyboardMarkup] = None):
     """Редактируем caption/text по типу сообщения; если нельзя — отправляем новое."""
@@ -156,6 +171,14 @@ def sanitize_phone(s: str) -> Optional[str]:
     digits = re.sub(r"\D+", "", s or "")
     return digits if 7 <= len(digits) <= 15 else None
 
+def gen_promo_for(user_id: int) -> dict:
+    suffix = secrets.token_hex(2).upper()  # напр. A9F3
+    code = f"VIM-{str(user_id)[-4:]}-{suffix}"
+    expires = datetime.now(timezone.utc) + timedelta(hours=72)
+    data = {"code": code, "expires_utc": expires.strftime("%Y-%m-%d %H:%M UTC")}
+    Store.promos[user_id] = data
+    return data
+
 # ---------- UI ----------
 def main_kb() -> InlineKeyboardMarkup:
     rows = [
@@ -164,13 +187,12 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💼 Кейсы (демо)", callback_data="go_cases"),
         ],
         [
-            # Квиз открывает WebApp сразу (если BASE_URL задан)
             InlineKeyboardButton(
                 text="🧪 Квиз-заявка",
                 web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/")
             ) if BASE_URL else InlineKeyboardButton(
                 text="🧪 Квиз-заявка (в чате)",
-                callback_data="go_quiz"  # fallback, если BASE_URL не задан
+                callback_data="go_quiz"
             ),
             InlineKeyboardButton(text="💸 Пакеты и цены", callback_data="go_prices"),
         ],
@@ -208,17 +230,14 @@ def admin_kb() -> InlineKeyboardMarkup:
 @dp.message(CommandStart())
 async def on_start(m: Message):
     Store.stats["starts"] += 1
-    # 1) hero (без кнопок)
+    # 1) hero
     hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
     try:
         await m.answer_photo(FSInputFile(hero), caption=header())
     except Exception:
         pass
-    # 2) короткий текст + клавиатура
-    await m.answer(
-        "Демо-бот: квиз, кейсы, запись. Нажмите кнопку ниже 👇",
-        reply_markup=main_kb()
-    )
+    # 2) текст + меню
+    await m.answer("Демо-бот: квиз, кейсы, запись. Нажмите кнопку ниже 👇", reply_markup=main_kb())
 
 @dp.message(Command("menu"))
 async def on_menu(m: Message):
@@ -290,14 +309,12 @@ async def check_leads(m: Message):
 async def test_leads_cmd(m: Message):
     if m.from_user.id != ADMIN_CHAT_ID:
         return
-
     def _parse(s: str):
         s = (s or "").strip()
         if not s: return None
         if s.startswith("@"): return s
         try: return int(s)
         except ValueError: return None
-
     target = _parse(LEADS_RAW)
     if not target:
         return await m.answer("LEADS_CHAT_ID не задан или некорректен.")
@@ -310,6 +327,7 @@ async def test_leads_cmd(m: Message):
     except Exception as e:
         await m.answer(f"❌ Не отправилось в {LEADS_RAW!r}:\n<code>{e}</code>")
 
+# --- Меню / контент ---
 @dp.callback_query(F.data == "hide_menu")
 async def cb_hide_menu(c: CallbackQuery):
     try:
@@ -385,7 +403,71 @@ async def cb_brief(c: CallbackQuery):
     )
     await safe_edit(c, brief); await c.answer()
 
-# --- Fallback: классический квиз в чате (если BASE_URL не задан) ---
+# --- 🎁 Подарок ---
+@dp.callback_query(F.data == "go_gift")
+async def cb_gift(c: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📄 Чек-лист PDF", callback_data="gift_pdf"),
+            InlineKeyboardButton(text="🎟 Промокод −20% (72ч)", callback_data="gift_promo"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Меню", callback_data="go_menu")]
+    ])
+    text = (
+        "<b>Выберите подарок</b>:\n"
+        "• Чек-лист «Бот, который окупится за 48 часов» (1 стр.)\n"
+        "• Промокод −20% на пакет Lite (действует 72 часа)"
+    )
+    await safe_edit(c, text, kb); await c.answer()
+
+@dp.callback_query(F.data == "gift_pdf")
+async def cb_gift_pdf(c: CallbackQuery):
+    uid = c.from_user.id
+    pdf_path = os.path.join(os.path.dirname(__file__), "assets", "gifts", "checklist.pdf")
+    caption = (
+        "<b>Чек-лист: «Бот, который окупится за 48 часов»</b>\n"
+        "1) Цель бота = 1 метрика\n"
+        "2) 4–6 кнопок, без перегруза\n"
+        "3) УТП + hero-картинка\n"
+        "4) Квиз 3–5 вопросов + 1 контакт\n"
+        "5) Лиды → админ-чат / Sheets\n"
+        "6) Автоответ клиенту\n"
+        "7) Оффер с ограничением\n"
+        "8) 3 кейса с цифрами\n"
+        "9) Память бота (не допрос)\n"
+        "10) Быстрые правки по данным\n"
+        "11) Напоминания/рассылки\n"
+        "12) Еженедельные цифры"
+    )
+    try:
+        if os.path.exists(pdf_path):
+            await c.message.answer_document(FSInputFile(pdf_path), caption=caption)
+        else:
+            await c.message.answer(caption)
+        Store.gift_claimed.add(uid)
+        await notify_admin(f"🎁 PDF чек-лист выдан: {c.from_user.full_name} (@{c.from_user.username or '—'})")
+    except Exception as e:
+        await c.message.answer(f"Не удалось отправить PDF: <code>{esc(str(e))}</code>")
+    await c.answer()
+
+@dp.callback_query(F.data == "gift_promo")
+async def cb_gift_promo(c: CallbackQuery):
+    uid = c.from_user.id
+    promo = Store.promos.get(uid) or gen_promo_for(uid)
+    txt = (
+        "<b>Ваш промокод: </b><code>{code}</code>\n"
+        "Скидка: −20% на пакет Lite\n"
+        "Срок: до {exp}\n\n"
+        "Как применить: укажите код при подтверждении заказа."
+    ).format(code=esc(promo["code"]), exp=esc(promo["expires_utc"]))
+    await c.message.answer(txt)
+    await notify_admin(
+        f"🎟 Промокод выдан: {c.from_user.full_name} (@{c.from_user.username or '—'}) → {promo['code']} до {promo['expires_utc']}"
+    )
+    Store.gift_claimed.add(uid)
+    await c.answer()
+
+# --- Fallback чат-квиз (если BASE_URL не задан) ---
 @dp.callback_query(F.data == "go_quiz")
 async def quiz_start(c: CallbackQuery, state: FSMContext):
     if not Store.accepting:
@@ -411,21 +493,16 @@ async def quiz_done(m: Message, state: FSMContext):
     data = await state.update_data(deadline=(m.text or "").strip()[:100])
     await state.clear()
     Store.stats["quiz"] += 1
-    await m.answer((
-        "Спасибо! Заявка получена 🎉\n\n"
-        f"Ниша: {esc(data.get('niche'))}\n"
-        f"Цель: {esc(data.get('goal'))}\n"
-        f"Срок: {esc(data.get('deadline'))}\n\n"
-        "Свяжемся в ближайшее время."
-    ), reply_markup=main_kb())
-    await notify_admin((
+    msg = (
         "🆕 Заявка (квиз-чат)\n"
         f"От: {ufmt(m)}\n"
         f"Ниша: {esc(data.get('niche'))}\n"
         f"Цель: {esc(data.get('goal'))}\n"
         f"Срок: {esc(data.get('deadline'))}\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
-    ))
+    )
+    await m.answer("Спасибо! Заявка получена 🎉", reply_markup=main_kb())
+    await notify_admin(msg)
 
 # --- Приём данных из WebApp ---
 @dp.message(F.web_app_data)
@@ -448,6 +525,7 @@ async def on_webapp_data(m: Message):
         f"Контакт: {esc(contact) or '—'}\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     )
+    # Отправляем и админу, и в лид-чат (с диагностикой внутри)
     await notify_admin(txt)
     await m.answer("Спасибо! Ваша заявка отправлена. Мы на связи.", reply_markup=main_kb())
 
@@ -477,14 +555,15 @@ async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], ra
     await state.clear()
     Store.stats["orders"] += 1
     clean = phone or (raw.strip() if raw else "—")
-    await m.answer("Спасибо! Мы на связи. Возврат в меню…", reply_markup=ReplyKeyboardRemove())
-    await m.answer("Главное меню:", reply_markup=main_kb())
-    await notify_admin((
+    msg = (
         "🛒 Заказ/контакт\n"
         f"От: {ufmt(m)}\n"
         f"Контакт: {esc(clean)}\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
-    ))
+    )
+    await m.answer("Спасибо! Мы на связи.", reply_markup=ReplyKeyboardRemove())
+    await m.answer("Главное меню:", reply_markup=main_kb())
+    await notify_admin(msg)
 
 # --- Error handler (aiogram 3.7+: один аргумент event) ---
 @dp.error()
@@ -504,14 +583,60 @@ STATIC_ROOT = os.path.join(os.path.dirname(__file__), "webapp")
 if os.path.isdir(STATIC_ROOT):
     app.mount("/webapp", StaticFiles(directory=STATIC_ROOT, html=True), name="webapp")
 
-# явный роут (работает и без завершающего /)
+# явный роут /webapp/quiz (+fallback встроенная форма)
+FALLBACK_QUIZ_HTML = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Квиз-заявка</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;
+margin:0;padding:20px}
+.card{max-width:640px;margin:0 auto;padding:20px;border:1px solid #eee;border-radius:16px}
+label{display:block;margin:12px 0 6px;font-weight:600}
+input,textarea{width:100%;padding:10px;border:1px solid #ccc;border-radius:10px}
+button{margin-top:16px;padding:12px 16px;border:0;border-radius:12px;cursor:pointer}
+button#send{background:#111;color:#fff}
+</style></head><body>
+<div class="card">
+<h3>Квиз-заявка</h3>
+<label>Описание компании</label>
+<textarea id="company" rows="3" placeholder="Чем занимаетесь?"></textarea>
+<label>Задача</label>
+<textarea id="task" rows="3" placeholder="Что нужно сделать боту?"></textarea>
+<label>Контакт в Telegram</label>
+<input id="contact" placeholder="@username или телефон">
+<button id="send">Отправить</button>
+</div>
+<script>
+(function(){
+  const tg = window.Telegram && Telegram.WebApp ? Telegram.WebApp : null;
+  const btn = document.getElementById('send');
+  function send(){
+    const payload = {
+      company: document.getElementById('company').value||"",
+      task: document.getElementById('task').value||"",
+      contact: document.getElementById('contact').value||""
+    };
+    if (tg && tg.sendData){
+      tg.sendData(JSON.stringify(payload));
+      tg.close();
+    } else {
+      alert('Откройте форму из бота, через кнопку «Квиз-заявка».');
+    }
+  }
+  if (tg){ tg.expand(); tg.ready(); }
+  btn.addEventListener('click', send);
+})();
+</script>
+</body></html>"""
+
 @app.get("/webapp/quiz", response_class=HTMLResponse)
 @app.get("/webapp/quiz/", response_class=HTMLResponse)
 async def webapp_quiz():
     index_path = os.path.join(STATIC_ROOT, "quiz", "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path, media_type="text/html")
-    raise HTTPException(status_code=404, detail="webapp/quiz not found")
+    return HTMLResponse(FALLBACK_QUIZ_HTML)
 
 # фавикон (чтобы не было 404)
 @app.get("/favicon.ico", include_in_schema=False)
