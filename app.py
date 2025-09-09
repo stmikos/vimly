@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
-Патч 2: на /start сначала отправляем hero-картинку (без кнопок),
-затем отдельным сообщением — текст + клавиатуру (которую дальше редактируем).
-
-Запуск на Render:
-Build:  pip install -r requirements.txt
-Start:  uvicorn app:app --host 0.0.0.0 --port $PORT
+Правки:
+- Перешёл на HTML parse mode (устраняет ошибки Markdown с подчёркиваниями и т.п.)
+- Безопасное редактирование сообщений (edit_text vs edit_caption)
+- /start: картинка отдельно, меню отдельным текстом (как ты просил)
+- WebApp-квиз остаётся
 """
 
 # --- imports ---
-import os, logging, re, asyncio, json
+import os, logging, re, asyncio, json, html
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -26,6 +25,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
     FSInputFile,
 )
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
@@ -37,12 +37,10 @@ except Exception:
     pass
 
 def _norm_base_url(s: str) -> str:
-    """Обрезаем пробелы и завершающий слэш"""
     s = (s or "").strip()
     return s[:-1] if s.endswith("/") else s
 
 def _norm_path(p: str) -> str:
-    """Обрезаем пробелы и гарантируем ведущий /"""
     p = (p or "").strip()
     return p if p.startswith("/") else f"/{p}"
 
@@ -51,7 +49,7 @@ if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN env var")
 
 ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
-LEADS_CHAT_ID = int((os.getenv("LEADS_CHAT_ID") or "0").strip() or "0")  # опционально: чат для дубля заявок
+LEADS_CHAT_ID = int((os.getenv("LEADS_CHAT_ID") or "0").strip() or "0")
 
 BASE_URL = _norm_base_url(os.getenv("BASE_URL"))
 WEBHOOK_PATH = _norm_path(os.getenv("WEBHOOK_PATH") or "/telegram/webhook/vimly")
@@ -68,19 +66,18 @@ BRAND_SITE = (os.getenv("BRAND_SITE") or "").strip()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("vimly-webapp-demo")
 
-# --- aiogram 3.7+ init (parse_mode через DefaultBotProperties) ---
+# --- aiogram 3.7+ init: HTML parse mode ---
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-
-bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
-dp = Dispatcher()  # объявлен до всех хендлеров
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()  # объявлен до хендлеров
 
 # ---- STORE ----
 class Store:
     accepting = True
     stats = {"starts": 0, "quiz": 0, "orders": 0, "webquiz": 0}
 
-# ---- FSM (classic quiz) ----
+# ---- FSM ----
 class Quiz(StatesGroup):
     niche = State()
     goal = State()
@@ -88,6 +85,45 @@ class Quiz(StatesGroup):
 
 class Order(StatesGroup):
     contact = State()
+
+# ---- helpers ----
+def esc(s: Optional[str]) -> str:
+    return html.escape(s or "", quote=False)
+
+def header() -> str:
+    parts = [f"<b>{esc(BRAND_NAME)}</b>", esc(BRAND_TAGLINE)]
+    if BRAND_SITE:
+        parts.append(esc(BRAND_SITE))
+    return "\n".join(parts)
+
+def ufmt(m: Message) -> str:
+    user = m.from_user
+    tag = f"@{user.username}" if user.username else f"id={user.id}"
+    return esc(f"{user.full_name} ({tag})")
+
+async def notify_admin(text: str):
+    if ADMIN_CHAT_ID:
+        try:
+            await bot.send_message(ADMIN_CHAT_ID, text, disable_notification=True)
+        except Exception as e:
+            log.warning("notify_admin failed: %s", e)
+    if LEADS_CHAT_ID:
+        try:
+            await bot.send_message(LEADS_CHAT_ID, text)
+        except Exception as e:
+            log.warning("notify_leads failed: %s", e)
+
+async def safe_edit(c: CallbackQuery, html_text: str, kb: InlineKeyboardMarkup | None = None):
+    """Акуратно редактируем: если сообщение было медиа — меняем подпись; если нельзя — шлём новое."""
+    kb = kb or main_kb()
+    m = c.message
+    try:
+        if getattr(m, "content_type", None) in {"photo","video","animation","document","audio","voice","video_note"}:
+            await m.edit_caption(caption=html_text, reply_markup=kb)
+        else:
+            await m.edit_text(html_text, reply_markup=kb)
+    except TelegramBadRequest:
+        await m.answer(html_text, reply_markup=kb)
 
 # ---- UI ----
 def main_kb() -> InlineKeyboardMarkup:
@@ -109,7 +145,6 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift"),
         ],
     ]
-    # Кнопка WebApp-квиза — только если есть BASE_URL
     if BASE_URL:
         rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз", web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz"))])
     else:
@@ -130,52 +165,19 @@ def admin_kb() -> InlineKeyboardMarkup:
         ]
     ])
 
-# ---- HELPERS ----
-def header() -> str:
-    parts = [f"*{BRAND_NAME}*", BRAND_TAGLINE]
-    if BRAND_SITE:
-        parts.append(BRAND_SITE)
-    return "\n".join(parts)
-
-def ufmt(m: Message) -> str:
-    user = m.from_user
-    tag = f"@{user.username}" if user.username else f"id={user.id}"
-    return f"{user.full_name} ({tag})"
-
-def sanitize_phone(s: str) -> Optional[str]:
-    digits = re.sub(r"\D+", "", s or "")
-    return digits if 7 <= len(digits) <= 15 else None
-
-async def notify_admin(text: str):
-    # Личный канал для владельца
-    if ADMIN_CHAT_ID:
-        try:
-            await bot.send_message(ADMIN_CHAT_ID, text, disable_notification=True)
-        except Exception as e:
-            log.warning("notify_admin failed: %s", e)
-    # Групповой чат лидов (если задан)
-    if LEADS_CHAT_ID:
-        try:
-            await bot.send_message(LEADS_CHAT_ID, text)
-        except Exception as e:
-            log.warning("notify_leads failed: %s", e)
-
 # ---- HANDLERS ----
 @dp.message(CommandStart())
 async def on_start(m: Message):
     Store.stats["starts"] += 1
-
-    # 1) отправляем hero-картинку без кнопок (caption — только заголовок)
+    # 1) hero (без кнопок)
     hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
     try:
-        await m.answer_photo(FSInputFile(hero), caption=f"{header()}")
+        await m.answer_photo(FSInputFile(hero), caption=header())
     except Exception:
-        # если файла нет — просто пропускаем
         pass
-
-    # 2) отправляем текст + клавиатуру (эту запись дальше редактируем в коллбэках)
+    # 2) текст + клавиатура (редактируем дальше)
     welcome = (
-        "Этот бот — *демо для клиентов*: меню, кейсы, квиз и запись в 2 клика.\n"
+        "Этот бот — <b>демо для клиентов</b>: меню, кейсы, квиз и запись в 2 клика.\n"
         "Нажмите кнопку ниже 👇"
     )
     await m.answer(welcome, reply_markup=main_kb())
@@ -190,27 +192,25 @@ async def on_admin(m: Message):
         return await m.answer("Админ-панель доступна владельцу бота.")
     await m.answer("Админ-панель:", reply_markup=admin_kb())
 
-# --- Callbacks: меню ---
 @dp.callback_query(F.data == "go_webapp_na")
 async def cb_webapp_na(c: CallbackQuery):
     await c.answer("Веб-форма включится после настройки BASE_URL.", show_alert=True)
 
 @dp.callback_query(F.data == "go_menu")
 async def cb_menu(c: CallbackQuery):
-    await c.message.edit_text("Главное меню:", reply_markup=main_kb())
-    await c.answer()
+    await safe_edit(c, "Главное меню:", kb=main_kb()); await c.answer()
 
 @dp.callback_query(F.data == "go_process")
 async def cb_process(c: CallbackQuery):
     txt = (
         "Как запускаем за 1–3 дня:\n"
-        "1) *Созвон 15 минут* — фиксируем цели\n"
-        "2) *MVP* — меню + квиз + админ-чат\n"
-        "3) *Запуск* — подключаем Sheets/оплату/канал\n"
-        "4) *Поддержка* — рассылки, правки, отчёты\n\n"
+        "1) <b>Созвон 15 минут</b> — фиксируем цели\n"
+        "2) <b>MVP</b> — меню + квиз + админ-чат\n"
+        "3) <b>Запуск</b> — подключаем Sheets/оплату/канал\n"
+        "4) <b>Поддержка</b> — рассылки, правки, отчёты\n\n"
         "Сроки и бюджет фиксируем письменно."
     )
-    await c.message.edit_text(txt, reply_markup=main_kb()); await c.answer()
+    await safe_edit(c, txt); await c.answer()
 
 @dp.callback_query(F.data == "go_cases")
 async def cb_cases(c: CallbackQuery):
@@ -222,33 +222,33 @@ async def cb_cases(c: CallbackQuery):
         "• Коворкинг — афиша/RSVP, считает гостей и выгружает список\n\n"
         "Покажу живые прототипы на созвоне."
     )
-    await c.message.edit_text(txt, reply_markup=main_kb()); await c.answer()
+    await safe_edit(c, txt); await c.answer()
 
 @dp.callback_query(F.data == "go_prices")
 async def cb_prices(c: CallbackQuery):
     txt = (
-        "*Пакеты и цены:*\n\n"
-        "• *Lite* — 15–20k ₽: меню/квиз/заявки, без БД и оплаты\n"
-        "• *Standard* — 25–45k ₽: + Google Sheets, админ-панель, напоминания\n"
-        "• *Pro* — 50–90k ₽: + оплата, доступ в канал, логи, бэкапы\n\n"
-        "_Поддержка 3–10k ₽/мес_: правки, рассылки, мониторинг"
+        "<b>Пакеты и цены:</b>\n\n"
+        "• <b>Lite</b> — 15–20k ₽: меню/квиз/заявки, без БД и оплаты\n"
+        "• <b>Standard</b> — 25–45k ₽: + Google Sheets, админ-панель, напоминания\n"
+        "• <b>Pro</b> — 50–90k ₽: + оплата, доступ в канал, логи, бэкапы\n\n"
+        "<i>Поддержка 3–10k ₽/мес</i>: правки, рассылки, мониторинг"
     )
-    await c.message.edit_text(txt, reply_markup=main_kb()); await c.answer()
+    await safe_edit(c, txt); await c.answer()
 
 @dp.callback_query(F.data == "go_contacts")
 async def cb_contacts(c: CallbackQuery):
     txt = (
-        "*Контакты:*\n"
-        f"Telegram: {BRAND_TG}\n"
-        f"Сайт/портфолио: {BRAND_SITE or '—'}\n\n"
+        "<b>Контакты:</b>\n"
+        f"Telegram: {esc(BRAND_TG)}\n"
+        f"Сайт/портфолио: {esc(BRAND_SITE) or '—'}\n\n"
         "Оставьте телефон — свяжемся в удобное время."
     )
-    await c.message.edit_text(txt, reply_markup=main_kb()); await c.answer()
+    await safe_edit(c, txt); await c.answer()
 
 @dp.callback_query(F.data == "go_brief")
 async def cb_brief(c: CallbackQuery):
     brief = (
-        "*Мини-бриф (7 вопросов):*\n"
+        "<b>Мини-бриф (7 вопросов):</b>\n"
         "1) Ниша и город\n"
         "2) Цель бота (заявки/запись/оплата/отзывы)\n"
         "3) Кнопки меню (4–6)\n"
@@ -257,7 +257,7 @@ async def cb_brief(c: CallbackQuery):
         "6) Нужна ли оплата и доступ в канал\n"
         "7) Срок запуска и бюджет"
     )
-    await c.message.edit_text(brief, reply_markup=main_kb()); await c.answer()
+    await safe_edit(c, brief); await c.answer()
 
 # --- Классический квиз (в чате) ---
 @dp.callback_query(F.data == "go_quiz")
@@ -265,39 +265,39 @@ async def quiz_start(c: CallbackQuery, state: FSMContext):
     if not Store.accepting:
         return await c.answer("Приём заявок временно закрыт", show_alert=True)
     await state.set_state(Quiz.niche)
-    await c.message.edit_text("🧪 Квиз: ваша ниша и город? (1/3)", reply_markup=None)
+    await safe_edit(c, "🧪 Квиз: ваша ниша и город? (1/3)", kb=None)
     await c.answer()
 
 @dp.message(Quiz.niche)
 async def quiz_niche(m: Message, state: FSMContext):
-    await state.update_data(niche=m.text.strip()[:200])
+    await state.update_data(niche=(m.text or "").strip()[:200])
     await state.set_state(Quiz.goal)
     await m.answer("Цель бота? (2/3) — заявки, запись, оплата, отзывы…")
 
 @dp.message(Quiz.goal)
 async def quiz_goal(m: Message, state: FSMContext):
-    await state.update_data(goal=m.text.strip()[:300])
+    await state.update_data(goal=(m.text or "").strip()[:300])
     await state.set_state(Quiz.deadline)
     await m.answer("Срок запуска? (3/3) — например: 2–3 дня / дата")
 
 @dp.message(Quiz.deadline)
 async def quiz_done(m: Message, state: FSMContext):
-    data = await state.update_data(deadline=m.text.strip()[:100])
+    data = await state.update_data(deadline=(m.text or "").strip()[:100])
     await state.clear()
     Store.stats["quiz"] += 1
     await m.answer((
         "Спасибо! Заявка получена 🎉\n\n"
-        f"Ниша: {data.get('niche')}\n"
-        f"Цель: {data.get('goal')}\n"
-        f"Срок: {data.get('deadline')}\n\n"
+        f"Ниша: {esc(data.get('niche'))}\n"
+        f"Цель: {esc(data.get('goal'))}\n"
+        f"Срок: {esc(data.get('deadline'))}\n\n"
         "Свяжемся в ближайшее время."
     ), reply_markup=main_kb())
     await notify_admin((
         "🆕 Заявка (квиз-чат)\n"
         f"От: {ufmt(m)}\n"
-        f"Ниша: {data.get('niche')}\n"
-        f"Цель: {data.get('goal')}\n"
-        f"Срок: {data.get('deadline')}\n"
+        f"Ниша: {esc(data.get('niche'))}\n"
+        f"Цель: {esc(data.get('goal'))}\n"
+        f"Срок: {esc(data.get('deadline'))}\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     ))
 
@@ -317,9 +317,9 @@ async def on_webapp_data(m: Message):
     txt = (
         "🧪 Заявка (WebApp)\n"
         f"От: {ufmt(m)}\n"
-        f"Компания: {comp or '—'}\n"
-        f"Задача: {task or '—'}\n"
-        f"Контакт: {contact or '—'}\n"
+        f"Компания: {esc(comp) or '—'}\n"
+        f"Задача: {esc(task) or '—'}\n"
+        f"Контакт: {esc(contact) or '—'}\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     )
     await notify_admin(txt)
@@ -339,33 +339,33 @@ async def order_start(c: CallbackQuery, state: FSMContext):
 
 @dp.message(Order.contact, F.contact)
 async def order_contact_obj(m: Message, state: FSMContext):
-    phone = sanitize_phone(m.contact.phone_number)
+    phone = re.sub(r"\D+", "", m.contact.phone_number or "")
     await finalize_order(m, state, phone=phone)
 
 @dp.message(Order.contact)
 async def order_contact_text(m: Message, state: FSMContext):
-    phone = sanitize_phone(m.text)
+    phone = re.sub(r"\D+", "", (m.text or ""))
     await finalize_order(m, state, phone=phone, raw=m.text)
 
 async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], raw: Optional[str] = None):
     await state.clear()
     Store.stats["orders"] += 1
-    clean = phone or (raw.strip() if raw else "—")
+    clean = phone if (phone and 7 <= len(phone) <= 15) else (raw.strip() if raw else "—")
     await m.answer("Спасибо! Мы на связи. Возврат в меню…", reply_markup=ReplyKeyboardRemove())
     await m.answer("Главное меню:", reply_markup=main_kb())
     await notify_admin((
         "🛒 Заказ/контакт\n"
         f"От: {ufmt(m)}\n"
-        f"Контакт: {clean}\n"
+        f"Контакт: {esc(clean)}\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     ))
 
-# --- Error handler (aiogram 3.7+ ожидает один аргумент event) ---
+# --- Error handler (aiogram 3.7+: один аргумент event) ---
 @dp.error()
 async def on_error(event):
     exc = getattr(event, "exception", None)
     try:
-        await notify_admin(f"⚠️ Ошибка: {repr(exc)}")
+        await notify_admin(f"⚠️ Ошибка: {html.escape(repr(exc))}")
     except Exception:
         pass
     logging.exception("Handler error: %s", exc)
@@ -380,7 +380,7 @@ if os.path.isdir(static_dir):
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return f"<h3>{BRAND_NAME} — {BRAND_TAGLINE}</h3>"
+    return f"<h3>{esc(BRAND_NAME)} — {esc(BRAND_TAGLINE)}</h3>"
 
 @app.get("/healthz", response_class=PlainTextResponse)
 async def healthz():
