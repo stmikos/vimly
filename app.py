@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
-- HTML parse mode (без Markdown-ошибок)
+
+Фишки:
+- HTML parse mode (устраняет ошибки Markdown)
 - /start: hero-картинка отдельно, меню отдельным текстом
-- safe_edit: редактирует caption/text корректно
-- WebApp-квиз + статика /webapp/quiz/ и /favicon.ico
+- safe_edit: корректно редактирует caption/text
+- WebApp-квиз: /webapp/quiz/ (+раздача статики, favicon)
+- Лиды: ADMIN_CHAT_ID и LEADS_CHAT_ID (+ LEADS_THREAD_ID для групп с Темами)
+- Диагностика: /chatid, /threadid, /test_leads
 """
 
 import os, logging, re, asyncio, json, html
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse, Response
+from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from aiogram import Bot, Dispatcher, F
@@ -49,7 +53,10 @@ if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN env var")
 
 ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
-LEADS_CHAT_ID = int((os.getenv("LEADS_CHAT_ID") or "0").strip() or "0")
+
+# Лид-чат: можно задать числовой ID (-100...) или @username канала
+LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()
+LEADS_THREAD_ID = int((os.getenv("LEADS_THREAD_ID") or "0").strip() or "0")
 
 BASE_URL = _norm_base_url(os.getenv("BASE_URL"))
 WEBHOOK_PATH = _norm_path(os.getenv("WEBHOOK_PATH") or "/telegram/webhook/vimly")
@@ -65,6 +72,7 @@ BRAND_SITE = (os.getenv("BRAND_SITE") or "").strip()
 # ---------- LOG ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("vimly-webapp-demo")
+log.info("Leads target (raw): %r  thread: %s", LEADS_RAW, LEADS_THREAD_ID or "—")
 
 # ---------- AIOGRAM ----------
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -99,15 +107,33 @@ def ufmt(m: Message) -> str:
     tag = f"@{user.username}" if user.username else f"id={user.id}"
     return esc(f"{user.full_name} ({tag})")
 
+def parse_leads_target(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    if s.startswith("@"):
+        return s  # username канала
+    try:
+        return int(s)  # числовой id группы/канала (-100…)
+    except ValueError:
+        return None
+
 async def notify_admin(text: str):
+    # Личка владельца
     if ADMIN_CHAT_ID:
         try:
             await bot.send_message(ADMIN_CHAT_ID, text, disable_notification=True)
         except Exception as e:
             log.warning("notify_admin failed: %s", e)
-    if LEADS_CHAT_ID:
+    # Лид-чат/канал
+    target = parse_leads_target(LEADS_RAW)
+    if target:
         try:
-            await bot.send_message(LEADS_CHAT_ID, text)
+            kwargs = {}
+            if LEADS_THREAD_ID:
+                kwargs["message_thread_id"] = LEADS_THREAD_ID
+            await bot.send_message(target, text, **kwargs)
+            log.info("Lead routed to %r (thread=%s)", LEADS_RAW, LEADS_THREAD_ID or "—")
         except Exception as e:
             log.warning("notify_leads failed: %s", e)
 
@@ -122,6 +148,10 @@ async def safe_edit(c: CallbackQuery, html_text: str, kb: Optional[InlineKeyboar
             await m.edit_text(html_text, reply_markup=kb)
     except TelegramBadRequest:
         await m.answer(html_text, reply_markup=kb)
+
+def sanitize_phone(s: str) -> Optional[str]:
+    digits = re.sub(r"\D+", "", s or "")
+    return digits if 7 <= len(digits) <= 15 else None
 
 # ---------- UI ----------
 def main_kb() -> InlineKeyboardMarkup:
@@ -144,7 +174,7 @@ def main_kb() -> InlineKeyboardMarkup:
         ],
     ]
     if BASE_URL:
-        rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз", web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/"))])  # со слэшем!
+        rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз", web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/"))])
     else:
         rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз (скоро)", callback_data="go_webapp_na")])
     rows.append([InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open")])
@@ -164,27 +194,6 @@ def admin_kb() -> InlineKeyboardMarkup:
     ])
 
 # ---------- HANDLERS ----------
-# === Диагностика чата/канала ===
-
-# 1) Команда покажет ID текущего чата (работает и в группе/канале)
-@dp.message(Command("chatid"))
-async def chat_id_cmd(m: Message):
-    # Включи бота в группу и пришли /chatid — бот ответит реальным chat.id
-    await m.answer(f"chat_id: <code>{m.chat.id}</code>")
-
-# 2) Тестовая отправка в LEADS_CHAT_ID (только для админа)
-@dp.message(Command("test_leads"))
-async def test_leads_cmd(m: Message):
-    if m.from_user.id != ADMIN_CHAT_ID:
-        return
-    if not LEADS_CHAT_ID:
-        return await m.answer("LEADS_CHAT_ID не задан.")
-    try:
-        await bot.send_message(LEADS_CHAT_ID, "🔔 Тестовая отправка в чат лидов: работает ✅")
-        await m.answer("Ок. Сообщение в чат лидов отправлено.")
-    except Exception as e:
-        await m.answer(f"Не удалось отправить в чат лидов: <code>{e}</code>")
-
 @dp.message(CommandStart())
 async def on_start(m: Message):
     Store.stats["starts"] += 1
@@ -208,6 +217,40 @@ async def on_admin(m: Message):
     if m.from_user.id != ADMIN_CHAT_ID:
         return await m.answer("Админ-панель доступна владельцу бота.")
     await m.answer("Админ-панель:", reply_markup=admin_kb())
+
+@dp.message(Command("chatid"))
+async def cmd_chatid(m: Message):
+    await m.answer(f"chat_id: <code>{m.chat.id}</code>")
+
+@dp.message(Command("threadid"))
+async def cmd_threadid(m: Message):
+    tid = getattr(m, "message_thread_id", None)
+    await m.answer(f"thread_id: <code>{tid}</code>")
+
+@dp.channel_post(Command("chatid"))
+async def channel_chatid(m: Message):
+    await m.answer(f"chat_id: <code>{m.chat.id}</code>")
+
+@dp.channel_post(Command("threadid"))
+async def channel_threadid(m: Message):
+    tid = getattr(m, "message_thread_id", None)
+    await m.answer(f"thread_id: <code>{tid}</code>")
+
+@dp.message(Command("test_leads"))
+async def test_leads_cmd(m: Message):
+    if m.from_user.id != ADMIN_CHAT_ID:
+        return
+    target = parse_leads_target(LEADS_RAW)
+    if not target:
+        return await m.answer("LEADS_CHAT_ID не задан или некорректен.")
+    try:
+        kwargs = {}
+        if LEADS_THREAD_ID:
+            kwargs["message_thread_id"] = LEADS_THREAD_ID
+        await bot.send_message(target, "🔔 Тест в чат лидов: работает ✅", **kwargs)
+        await m.answer(f"OK → {LEADS_RAW!r} (thread={LEADS_THREAD_ID or '—'})")
+    except Exception as e:
+        await m.answer(f"Не отправилось в {LEADS_RAW!r}:\n<code>{e}</code>")
 
 @dp.callback_query(F.data == "go_webapp_na")
 async def cb_webapp_na(c: CallbackQuery):
@@ -356,18 +399,18 @@ async def order_start(c: CallbackQuery, state: FSMContext):
 
 @dp.message(Order.contact, F.contact)
 async def order_contact_obj(m: Message, state: FSMContext):
-    phone = re.sub(r"\D+", "", m.contact.phone_number or "")
+    phone = sanitize_phone(m.contact.phone_number)
     await finalize_order(m, state, phone=phone)
 
 @dp.message(Order.contact)
 async def order_contact_text(m: Message, state: FSMContext):
-    phone = re.sub(r"\D+", "", (m.text or ""))
+    phone = sanitize_phone(m.text)
     await finalize_order(m, state, phone=phone, raw=m.text)
 
 async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], raw: Optional[str] = None):
     await state.clear()
     Store.stats["orders"] += 1
-    clean = phone if (phone and 7 <= len(phone) <= 15) else (raw.strip() if raw else "—")
+    clean = phone or (raw.strip() if raw else "—")
     await m.answer("Спасибо! Мы на связи. Возврат в меню…", reply_markup=ReplyKeyboardRemove())
     await m.answer("Главное меню:", reply_markup=main_kb())
     await notify_admin((
@@ -411,6 +454,15 @@ async def favicon():
     if os.path.exists(hero):
         return FileResponse(hero, media_type="image/png")
     return Response(status_code=204)
+
+# HEAD-хендлеры (убирают 405 от пингов Render)
+@app.head("/")
+async def head_root():
+    return Response(status_code=200)
+
+@app.head("/healthz")
+async def head_healthz():
+    return Response(status_code=200)
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
