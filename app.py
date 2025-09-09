@@ -145,8 +145,13 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift"),
         ],
     ]
-    if BASE_URL:
-        rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз", web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz"))])
+   # где формируется меню
+if BASE_URL:
+    rows.append([InlineKeyboardButton(
+        text="🧪 WebApp-квиз",
+        web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/")  # <-- слэш!
+    )])
+
     else:
         rows.append([InlineKeyboardButton(text="🧪 WebApp-квиз (скоро)", callback_data="go_webapp_na")])
     rows.append([InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open")])
@@ -385,6 +390,21 @@ async def index():
 @app.get("/healthz", response_class=PlainTextResponse)
 async def healthz():
     return "ok"
+# ЯВНЫЙ роут на /webapp/quiz (работает и без слэша)
+@app.get("/webapp/quiz", response_class=HTMLResponse)
+async def webapp_quiz():
+    index_path = os.path.join(static_dir, "quiz", "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path, media_type="text/html")
+    raise HTTPException(status_code=404, detail="webapp/quiz not found")
+
+# Фавиконка, чтобы убрать 404 (можно вернуть hero как иконку)
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
+    if os.path.exists(hero):
+        return FileResponse(hero, media_type="image/png")
+    return Response(status_code=204)
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
