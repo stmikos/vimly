@@ -23,5 +23,5 @@ services:
     - key: BRAND_TG
       value: @Vimly_bot
     - key: LEADS_CHAT_ID
-      value: "-1002872110450"
+      value: "-4818110291"
 
