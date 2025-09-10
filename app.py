@@ -129,30 +129,29 @@ def parse_leads_target(s: str):
     except ValueError: return None
 
 async def _send_to_leads(text: str) -> bool:
-    """Постит в лид-чат. True — доставлено, False — ошибка (алерт админу внутри)."""
     target = parse_leads_target(LEADS_RAW)
     if not target:
-        log.error("LEADS_CHAT_ID is empty or invalid: %r", LEADS_RAW)
+        log.error("LEADS_CHAT_ID invalid/empty: %r", LEADS_RAW)
         return False
     try:
         kwargs = {"disable_web_page_preview": True}
         if LEADS_THREAD_ID:
             kwargs["message_thread_id"] = LEADS_THREAD_ID
         msg = await bot.send_message(target, text, **kwargs)
-        log.info("Lead → chat=%s thread=%s msg_id=%s", LEADS_RAW, LEADS_THREAD_ID or "—", getattr(msg, "message_id", "—"))
+        try:
+            chat = await bot.get_chat(target)
+            log.info("LEADS OK → %s (%s), msg_id=%s", getattr(chat, "title", "—"), chat.id, msg.message_id)
+            if ADMIN_CHAT_ID:
+                await bot.send_message(ADMIN_CHAT_ID, f"LEADS OK → <b>{esc(getattr(chat,'title','—'))}</b> (<code>{chat.id}</code>), msg_id={msg.message_id}", disable_notification=True)
+        except Exception:
+            log.info("LEADS OK → chat=%r msg_id=%s", LEADS_RAW, getattr(msg,"message_id","—"))
         return True
     except Exception as e:
-        log.warning("notify_leads failed (%r): %s", LEADS_RAW, e)
+        log.warning("LEADS FAIL → %r | %s", LEADS_RAW, e)
         if ADMIN_CHAT_ID:
-            try:
-                await bot.send_message(
-                    ADMIN_CHAT_ID,
-                    f"⚠️ Не удалось отправить в лид-чат {LEADS_RAW!r}:\n<code>{esc(str(e))}</code>",
-                    disable_web_page_preview=True
-                )
-            except Exception:
-                pass
+            await bot.send_message(ADMIN_CHAT_ID, f"⚠️ LEADS FAIL → <code>{esc(str(e))}</code>\n(target={esc(str(LEADS_RAW))}, thread={LEADS_THREAD_ID or '—'})", disable_notification=True)
         return False
+
 
 async def notify_admin(text: str) -> bool:
     if ADMIN_CHAT_ID:
