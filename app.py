@@ -56,6 +56,7 @@ ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
 
 LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()         # "-4908..." или "@channel"
 LEADS_THREAD_ID = int((os.getenv("LEADS_THREAD_ID") or "0").strip() or "0")
+LEADS_FAIL_MSG = "⚠️ Лид-чат временно недоступен — админ уведомлён."
 
 BASE_URL = _norm_base_url(os.getenv("BASE_URL"))
 WEBHOOK_PATH = _norm_path(os.getenv("WEBHOOK_PATH") or "/telegram/webhook/vimly")
@@ -551,7 +552,11 @@ async def cb_gift_pdf(c: CallbackQuery):
         else:
             await c.message.answer(caption)
         Store.gift_claimed.add(uid)
-        await notify_admin(f"🎁 PDF чек-лист выдан: {c.from_user.full_name} (@{c.from_user.username or '—'})")
+       delivered = await notify_admin(
+            f"🎁 PDF чек-лист выдан: {c.from_user.full_name} (@{c.from_user.username or '—'})"
+        )
+        if not delivered:
+            await c.message.answer(LEADS_FAIL_MSG)
     except Exception as e:
         await c.message.answer(f"Не удалось отправить PDF: <code>{esc(str(e))}</code>")
     await c.answer()
@@ -564,7 +569,11 @@ async def cb_gift_promo(c: CallbackQuery):
            "Скидка: −20% на Lite, до {exp}\n"
            "Примените при подтверждении заказа.").format(code=esc(promo["code"]), exp=esc(promo["expires_utc"]))
     await c.message.answer(txt)
-    await notify_admin(f"🎟 Промокод выдан: {c.from_user.full_name} → {promo['code']} (до {promo['expires_utc']})")
+    delivered = await notify_admin(
+        f"🎟 Промокод выдан: {c.from_user.full_name} → {promo['code']} (до {promo['expires_utc']})"
+    )
+    if not delivered:
+        await c.message.answer(LEADS_FAIL_MSG)
     Store.gift_claimed.add(uid)
     await c.answer()
 
@@ -600,7 +609,9 @@ async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], ra
            f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}")
     await m.answer("Спасибо! Мы на связи.", reply_markup=ReplyKeyboardRemove())
     await m.answer("Главное меню:", reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
-    await notify_admin(msg)
+    delivered = await notify_admin(msg)
+    if not delivered:
+        await m.answer(LEADS_FAIL_MSG)
 
 # --- Чат-квиз (ForceReply в группах) + проверки пустых ответов ---
 @dp.callback_query(F.data == "go_quiz")
@@ -647,15 +658,27 @@ async def quiz_done(m: Message, state: FSMContext):
     data = await state.update_data(deadline=txt[:100])
     await state.clear()
     Store.stats["quiz"] += 1
-    msg = ("🆕 Заявка (квиз-чат)\n"
-           f"От: {ufmt(m)}\n"
-           f"Ниша: {esc(data.get('niche'))}\n"
-           f"Цель: {esc(data.get('goal'))}\n"
-           f"Срок: {esc(data.get('deadline'))}\n"
-           f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}")
-    await m.answer("Ваша анкета отправлена, спасибо! ✅",
-                   reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
-    await notify_admin(msg)
+    msg = (
+        "🆕 Заявка (квиз-чат)\n"
+        f"От: {ufmt(m)}\n"
+        f"Ниша: {esc(data.get('niche'))}\n"
+        f"Цель: {esc(data.get('goal'))}\n"
+        f"Срок: {esc(data.get('deadline'))}\n"
+        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    )
+    delivered = await notify_admin(msg)
+    ack = "Ваша анкета отправлена, спасибо! ✅"
+    if not delivered:
+        warn = "⚠️ Лид-чат временно недоступен — админ уведомлён."
+        if ADMIN_CHAT_ID:
+            try:
+                await bot.send_message(ADMIN_CHAT_ID, warn, disable_notification=True)
+            except Exception:
+                pass
+        ack += f"\n{warn}"
+    await m.answer(ack,
+        reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)),
+    )
 
 # --- Приём данных из WebApp (строгая валидация) ---
 @dp.message(F.web_app_data)
@@ -682,8 +705,11 @@ async def on_webapp_data(m: Message):
 
     ack = "Ваша анкета отправлена, спасибо! ✅"
     if not delivered:
-        ack += "\n" + ("(заголовок уже в лид-чате; полная карточка у админа)" if header_ok
-                       else "⚠️ Лид-чат временно недоступен — админ уведомлён.")
+       ack += "\n" + (
+            "(заголовок уже в лид-чате; полная карточка у админа)"
+            if header_ok
+            else LEADS_FAIL_MSG
+        )
     await m.answer(ack, reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
 
 # ---------- FASTAPI ----------
@@ -700,14 +726,18 @@ async def webapp_submit(payload: dict = Body(...)):
     if not ok:
         return JSONResponse({"ok": False, "error": err}, status_code=400)
 
-    await _send_to_leads("📥 Новая заявка (WebApp/браузер)")
-    txt = ("🧪 Заявка (WebApp/браузер)\n"
-           "От: неизвестно (браузер)\n"
-           f"Компания: {esc(comp)}\n"
-           f"Задача: {esc(task)}\n"
-           f"Контакт: {esc(contact)}\n"
-           f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}")
-    await notify_admin(txt)
+    header_ok = await _send_to_leads("📥 Новая заявка (WebApp/браузер)")
+    txt = (
+        "🧪 Заявка (WebApp/браузер)\n"
+        "От: неизвестно (браузер)\n"
+        f"Компания: {esc(comp)}\n"
+        f"Задача: {esc(task)}\n"
+        f"Контакт: {esc(contact)}\n"
+        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    )
+    delivered = await notify_admin(txt)
+    if not (header_ok and delivered):
+        return {"ok": False, "error": "leads_unavailable"}
     return {"ok": True}
 
 # статика WebApp (если есть папка webapp)
@@ -876,6 +906,45 @@ async def on_startup():
         BOT_USERNAME = me.username or BOT_USERNAME
     except Exception as e:
         log.warning("get_me failed: %s", e)
+        me = None
+
+    # Verify that leads target is valid and bot can send messages there
+    target = parse_leads_target(LEADS_RAW)
+    if not target:
+        log.critical("LEADS_CHAT_ID invalid/empty: %r", LEADS_RAW)
+        Store.accepting = False
+        if ADMIN_CHAT_ID:
+            try:
+                await bot.send_message(ADMIN_CHAT_ID,
+                    "⚠️ LEADS_CHAT_ID invalid/empty. Приём заявок отключён.")
+            except Exception:
+                pass
+    else:
+        try:
+            if me is None:
+                me = await bot.get_me()
+            cm = await bot.get_chat_member(target, me.id)
+            if getattr(cm, "status", None) in {"left", "kicked"} or \
+               (hasattr(cm, "can_send_messages") and not getattr(cm, "can_send_messages")):
+                raise TelegramForbiddenError("Bot has no send rights")
+        except TelegramForbiddenError as e:
+            log.critical("Bot lacks permissions for LEADS_CHAT_ID %r: %s", LEADS_RAW, e)
+            Store.accepting = False
+            if ADMIN_CHAT_ID:
+                try:
+                    await bot.send_message(ADMIN_CHAT_ID,
+                        "⚠️ Бот не может писать в лид-чат. Приём заявок отключён.")
+                except Exception:
+                    pass
+        except Exception as e:
+            log.critical("Failed to verify LEADS_CHAT_ID %r: %s", LEADS_RAW, e)
+            Store.accepting = False
+            if ADMIN_CHAT_ID:
+                try:
+                    await bot.send_message(ADMIN_CHAT_ID,
+                        f"⚠️ Не удалось проверить лид-чат: <code>{esc(str(e))}</code>")
+                except Exception:
+                    pass
 
     if MODE == "webhook":
         if BASE_URL:
