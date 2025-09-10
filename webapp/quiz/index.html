@@ -36,7 +36,9 @@
   <script>
 (function(){
   const tg = window.Telegram && Telegram.WebApp ? Telegram.WebApp : null;
+  const card = document.querySelector('.card');
   const btn = document.getElementById('send');
+
   async function send(){
     const payload = {
       company: document.getElementById('company').value||"",
@@ -47,23 +49,21 @@
       tg.sendData(JSON.stringify(payload));
       tg.close();
     } else {
-      // Fallback: отправим напрямую на сервер
       try{
         await fetch('/webapp/submit', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
           body: JSON.stringify(payload)
         });
-        alert('Заявка отправлена. Спасибо!');
+        card.innerHTML = '<h3>Ваша анкета отправлена, спасибо! ✅</h3><p>Мы свяжемся с вами в ближайшее время.</p>';
       }catch(e){
-        alert('Не удалось отправить заявку: '+e);
+        card.insertAdjacentHTML('beforeend','<p style="color:#b00">Не удалось отправить заявку: '+e+'</p>');
       }
     }
   }
-  if (tg){ tg.expand(); tg.ready(); }
+  if(tg){ tg.expand(); tg.ready(); }
   btn.addEventListener('click', send);
 })();
 </script>
-
 </body>
 </html>
