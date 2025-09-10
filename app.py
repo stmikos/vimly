@@ -48,6 +48,21 @@ if not BOT_TOKEN:
 ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
 
 LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()         # "-100…", "-49…"(группа) или "@channel"
+if not LEADS_RAW:
+    logging.critical(
+        "Missing LEADS_CHAT_ID. Provide a negative group ID like '-1001234567890' or '@channel'."
+    )
+    raise RuntimeError("Missing LEADS_CHAT_ID env var")
+if not LEADS_RAW.startswith("@"):
+    try:
+        if int(LEADS_RAW) >= 0:
+            raise ValueError
+    except ValueError:
+        logging.critical(
+            "Invalid LEADS_CHAT_ID %r. Use negative group ID like '-1001234567890' or '@channel'.",
+            LEADS_RAW,
+        )
+        raise RuntimeError("Invalid LEADS_CHAT_ID env var")
 LEADS_THREAD_ID = int((os.getenv("LEADS_THREAD_ID") or "0").strip() or "0")
 LEADS_FAIL_MSG = "⚠️ Лид-чат временно недоступен — админ уведомлён."
 
