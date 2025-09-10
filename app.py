@@ -2,23 +2,23 @@
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
 
-Фичи:
-- Корректный HTML parse mode
-- Контекстная клавиатура: WebApp-кнопка только в личке, в группах — чат-квиз
-- WebApp-квиз: сначала шапка в лид-чат, затем полная карточка (с безопасной обрезкой)
-- Явный статус доставки пользователю
+Что входит:
+- Контекстная клавиатура:
+  • в ЛС: WebApp «Квиз (в Telegram)» + «Квиз (в браузере)»
+  • в группах: «Квиз (в чате)» + «Квиз (в браузере)»
+- WebApp-заявки: сначала короткий хедер в лид-чат, затем полная карточка (с безопасной обрезкой)
+- HTTP-fallback /webapp/submit для заявок из браузера
 - Диагностика лид-чата: /check_leads, /test_leads, /chatid, /threadid
-- Подарок: PDF чек-лист + промокод (72ч)
-- Статика /webapp/quiz/ + fallback HTML
+- 🎁 Подарок: PDF чек-лист + промокод (72ч)
+- Статика /webapp/quiz/ + резервный HTML
 - HEAD-роуты, favicon
 """
 
 import os, logging, re, asyncio, json, html, secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from fastapi import Body
 
-from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi import FastAPI, Request, HTTPException, Response, Body
 from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -220,21 +220,32 @@ async def send_lead_header(kind: str, m: Message) -> bool:
 
 # ---------- UI ----------
 def main_kb(is_private: bool) -> InlineKeyboardMarkup:
-    quiz_btn = (
+    # WebApp — только в личке; везде добавляем браузерный fallback
+    webapp_btn = (
         InlineKeyboardButton(
-            text="🧪 Квиз-заявка",
+            text="🧪 Квиз (в Telegram)",
             web_app=WebAppInfo(url=f"{BASE_URL}/webapp/quiz/")
         ) if (BASE_URL and is_private) else
-        InlineKeyboardButton(text="🧪 Квиз-заявка (в чате)", callback_data="go_quiz")
+        InlineKeyboardButton(text="🧪 Квиз (в чате)", callback_data="go_quiz")
     )
+    browser_btn = InlineKeyboardButton(
+        text="🌐 Квиз (в браузере)",
+        url=f"{BASE_URL}/webapp/quiz/"
+    ) if BASE_URL else None
+
+    row_quiz = [webapp_btn]
+    if browser_btn:
+        row_quiz.append(browser_btn)
+
     rows = [
         [InlineKeyboardButton(text="🧭 Процесс", callback_data="go_process"),
          InlineKeyboardButton(text="💼 Кейсы (демо)", callback_data="go_cases")],
-        [quiz_btn, InlineKeyboardButton(text="💸 Пакеты и цены", callback_data="go_prices")],
-        [InlineKeyboardButton(text="🛒 Заказать", callback_data="go_order"),
-         InlineKeyboardButton(text="📬 Контакты", callback_data="go_contacts")],
-        [InlineKeyboardButton(text="📝 Бриф (7 вопросов)", callback_data="go_brief"),
-         InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift")],
+        row_quiz,
+        [InlineKeyboardButton(text="💸 Пакеты и цены", callback_data="go_prices"),
+         InlineKeyboardButton(text="🛒 Заказать", callback_data="go_order")],
+        [InlineKeyboardButton(text="📬 Контакты", callback_data="go_contacts"),
+         InlineKeyboardButton(text="📝 Бриф (7 вопросов)", callback_data="go_brief")],
+        [InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift")],
         [InlineKeyboardButton(text="↘ Скрыть меню", callback_data="hide_menu")],
         [InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open")],
     ]
@@ -341,6 +352,12 @@ async def test_leads_cmd(m: Message):
         await m.answer(f"❌ Не отправилось в {LEADS_RAW!r}:\n<code>{e}</code>")
 
 # --- Меню / контент ---
+@dp.callback_query(F.data == "admin_open")
+async def cb_admin_open(c: CallbackQuery):
+    if c.from_user.id != ADMIN_CHAT_ID:
+        await c.answer("Только владелец бота", show_alert=True); return
+    await safe_edit(c, "Админ-панель:")
+
 @dp.callback_query(F.data == "hide_menu")
 async def cb_hide_menu(c: CallbackQuery):
     try:
@@ -454,7 +471,7 @@ async def cb_gift_promo(c: CallbackQuery):
     Store.gift_claimed.add(uid)
     await c.answer()
 
-# --- Fallback чат-квиз (если нет WebApp в контексте) ---
+# --- Fallback чат-квиз ---
 @dp.callback_query(F.data == "go_quiz")
 async def quiz_start(c: CallbackQuery, state: FSMContext):
     if not Store.accepting:
@@ -505,7 +522,7 @@ async def on_webapp_data(m: Message):
     task    = (data.get("task") or "").strip()[:20000]
     contact = (data.get("contact") or "").strip()[:500]
 
-    # 1) короткий хедер — почти нечему сломаться
+    # 1) короткий хедер — почти небьётся
     header_ok = await send_lead_header("WebApp", m)
 
     # 2) полная карточка (с безопасной обрезкой)
@@ -516,8 +533,28 @@ async def on_webapp_data(m: Message):
     if delivered:
         ack = "Спасибо! Заявка отправлена ✅\n(доставлено в лид-чат и админу)"
     else:
-        ack = "Спасибо! Заявка отправлена ✅\n" + ("(заголовок уже в лид-чате; полная карточка ушла админу)" if header_ok else "⚠️ Лид-чат недоступен — админ уведомлён.")
+        ack = "Спасибо! Заявка отправлена ✅\n" + ("(заголовок уже в лид-чате; полная карточка у админа)" if header_ok else "⚠️ Лид-чат недоступен — админ уведомлён.")
     await m.answer(ack, reply_markup=main_kb(is_private=(m.chat.type == "private")))
+
+# --- HTTP-fallback для браузера ---
+app = FastAPI(title="Vimly — Client Demo Bot (WebApp)")
+@app.post("/webapp/submit")
+async def webapp_submit(payload: dict = Body(...)):
+    comp    = (payload.get("company") or "").strip()[:20000]
+    task    = (payload.get("task") or "").strip()[:20000]
+    contact = (payload.get("contact") or "").strip()[:500]
+    # Короткий хедер + полная карточка (без Telegram-пользователя)
+    await _send_to_leads("📥 Новая заявка (WebApp/браузер)")
+    txt = (
+        "🧪 Заявка (WebApp/браузер)\n"
+        "От: неизвестно (браузер)\n"
+        f"Компания: {esc(comp) or '—'}\n"
+        f"Задача: {esc(task) or '—'}\n"
+        f"Контакт: {esc(contact) or '—'}\n"
+        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    )
+    await notify_admin(txt)
+    return {"ok": True}
 
 # --- Заказ (контакт) ---
 @dp.callback_query(F.data == "go_order")
@@ -565,12 +602,13 @@ async def on_error(event):
         pass
     logging.exception("Handler error: %s", exc)
 
-# ---------- FASTAPI ----------
-app = FastAPI(title="Vimly — Client Demo Bot (WebApp)")
+# ---------- FASTAPI статика и страницы ----------
+# статика WebApp (html=True раздаёт index.html в папках)
 STATIC_ROOT = os.path.join(os.path.dirname(__file__), "webapp")
 if os.path.isdir(STATIC_ROOT):
     app.mount("/webapp", StaticFiles(directory=STATIC_ROOT, html=True), name="webapp")
 
+# явный роут /webapp/quiz (+fallback встроенная форма c POST на /webapp/submit)
 FALLBACK_QUIZ_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Квиз-заявка</title>
@@ -585,10 +623,35 @@ button#send{background:#111;color:#fff}</style></head><body>
 <label>Задача</label><textarea id="task" rows="3" placeholder="Что нужно сделать боту?"></textarea>
 <label>Контакт в Telegram</label><input id="contact" placeholder="@username или телефон">
 <button id="send">Отправить</button></div>
-<script>(function(){const tg=window.Telegram&&Telegram.WebApp?Telegram.WebApp:null;const btn=document.getElementById('send');
-function send(){const payload={company:document.getElementById('company').value||"",task:document.getElementById('task').value||"",contact:document.getElementById('contact').value||""};
-if(tg&&tg.sendData){tg.sendData(JSON.stringify(payload));tg.close()}else{alert('Откройте форму из бота, через кнопку «Квиз-заявка».')}}
-if(tg){tg.expand();tg.ready()}btn.addEventListener('click',send)})();</script></body></html>"""
+<script>(function(){
+  const tg = window.Telegram && Telegram.WebApp ? Telegram.WebApp : null;
+  const btn = document.getElementById('send');
+  async function send(){
+    const payload = {
+      company: document.getElementById('company').value||"",
+      task: document.getElementById('task').value||"",
+      contact: document.getElementById('contact').value||""
+    };
+    if (tg && tg.sendData){
+      tg.sendData(JSON.stringify(payload));
+      tg.close();
+    } else {
+      try{
+        await fetch('/webapp/submit', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(payload)
+        });
+        alert('Заявка отправлена. Спасибо!');
+      }catch(e){
+        alert('Не удалось отправить заявку: '+e);
+      }
+    }
+  }
+  if (tg){ tg.expand(); tg.ready(); }
+  btn.addEventListener('click', send);
+})();</script>
+</body></html>"""
 
 @app.get("/webapp/quiz", response_class=HTMLResponse)
 @app.get("/webapp/quiz/", response_class=HTMLResponse)
@@ -598,6 +661,7 @@ async def webapp_quiz():
         return FileResponse(index_path, media_type="text/html")
     return HTMLResponse(FALLBACK_QUIZ_HTML)
 
+# фавикон (чтобы не было 404)
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
@@ -605,8 +669,10 @@ async def favicon():
         return FileResponse(hero, media_type="image/png")
     return Response(status_code=204)
 
+# HEAD-хендлеры (убирают 405 от пингов)
 @app.head("/")
 async def head_root(): return Response(status_code=200)
+
 @app.head("/healthz")
 async def head_healthz(): return Response(status_code=200)
 
@@ -627,30 +693,6 @@ async def webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
-@app.post("/webapp/submit")
-async def webapp_submit(payload: dict = Body(...)):
-    # Пытаемся выжать поля
-    comp    = (payload.get("company") or "").strip()[:20000]
-    task    = (payload.get("task") or "").strip()[:20000]
-    contact = (payload.get("contact") or "").strip()[:500]
-
-    # Т.к. это браузер — у нас нет Telegram-профиля. Помечаем явно.
-    pseudo_user = type("U", (), {"full_name": "Браузерный посетитель", "username": None, "id": 0})
-    pseudo_msg = type("M", (), {"from_user": pseudo_user})
-
-    header_ok = await _send_to_leads("📥 Новая заявка (WebApp/браузер)")
-    txt = (
-        "🧪 Заявка (WebApp/браузер)\n"
-        "От: неизвестно (форма из браузера)\n"
-        f"Компания: {esc(comp) or '—'}\n"
-        f"Задача: {esc(task) or '—'}\n"
-        f"Контакт: {esc(contact) or '—'}\n"
-        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
-    )
-    # дублируем админу и в лид-чат
-    await notify_admin(txt)
-    return {"ok": True, "lead_header": header_ok}
-    
 # ---------- LIFECYCLE ----------
 @app.on_event("startup")
 async def on_startup():
