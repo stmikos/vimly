@@ -2,16 +2,16 @@
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
 
-Что входит:
+Включает:
 - Контекстная клавиатура:
-  • в ЛС: WebApp «Квиз (в Telegram)» + «Квиз (в браузере)»
+  • в ЛС: «Квиз (в Telegram)» (WebApp) + «Квиз (в браузере)»
   • в группах: «Квиз (в чате)» + «Квиз (в браузере)»
-- WebApp-заявки: сначала короткий хедер в лид-чат, затем полная карточка (с безопасной обрезкой)
-- HTTP-fallback /webapp/submit для заявок из браузера
-- Диагностика лид-чата: /check_leads, /test_leads, /chatid, /threadid
+- WebApp-заявки: сначала короткий хедер в лид-чат, затем полная карточка (с безопасной обрезкой под лимит)
+- Явное подтверждение пользователю: «Ваша анкета отправлена, спасибо!»
+- HTTP-fallback /webapp/submit — заявки из браузера тоже улетают в лид-чат и админу
+- Диагностика: /check_leads, /test_leads, /chatid, /threadid
 - 🎁 Подарок: PDF чек-лист + промокод (72ч)
-- Статика /webapp/quiz/ + резервный HTML
-- HEAD-роуты, favicon
+- Статика /webapp/quiz/ (+встроенный fallback HTML), favicon, HEAD-роуты
 """
 
 import os, logging, re, asyncio, json, html, secrets
@@ -57,7 +57,8 @@ if not BOT_TOKEN:
 
 ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
 
-LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()           # -100... или @channelusername
+# Лид-чат: -100… (супергруппа/канал) или @username канала
+LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()
 LEADS_THREAD_ID = int((os.getenv("LEADS_THREAD_ID") or "0").strip() or "0")
 
 BASE_URL = _norm_base_url(os.getenv("BASE_URL"))
@@ -92,6 +93,7 @@ class Quiz(StatesGroup):
     niche = State()
     goal = State()
     deadline = State()
+
 class Order(StatesGroup):
     contact = State()
 
@@ -121,21 +123,23 @@ async def _send_to_leads(text: str) -> bool:
     """Постит в лид-чат. True — доставлено, False — ошибка (алерт админу внутри)."""
     target = parse_leads_target(LEADS_RAW)
     if not target:
+        log.error("LEADS_CHAT_ID is empty or invalid: %r", LEADS_RAW)
         return False
     try:
-        kwargs = {}
+        kwargs = {"disable_web_page_preview": True}
         if LEADS_THREAD_ID:
             kwargs["message_thread_id"] = LEADS_THREAD_ID
-        await bot.send_message(target, text, **kwargs)
-        log.info("Lead routed to %r (thread=%s)", LEADS_RAW, LEADS_THREAD_ID or "—")
+        msg = await bot.send_message(target, text, **kwargs)
+        log.info("Lead → chat_id=%s thread=%s msg_id=%s", LEADS_RAW, LEADS_THREAD_ID or "—", getattr(msg, "message_id", "—"))
         return True
     except Exception as e:
-        log.warning("notify_leads failed: %s", e)
+        log.warning("notify_leads failed (%r): %s", LEADS_RAW, e)
         if ADMIN_CHAT_ID:
             try:
                 await bot.send_message(
                     ADMIN_CHAT_ID,
-                    f"⚠️ Не удалось отправить в лид-чат {LEADS_RAW!r}:\n<code>{esc(str(e))}</code>"
+                    f"⚠️ Не удалось отправить в лид-чат {LEADS_RAW!r}:\n<code>{esc(str(e))}</code>",
+                    disable_web_page_preview=True
                 )
             except Exception:
                 pass
@@ -144,7 +148,7 @@ async def _send_to_leads(text: str) -> bool:
 async def notify_admin(text: str) -> bool:
     if ADMIN_CHAT_ID:
         try:
-            await bot.send_message(ADMIN_CHAT_ID, text, disable_notification=True)
+            await bot.send_message(ADMIN_CHAT_ID, text, disable_notification=True, disable_web_page_preview=True)
         except Exception as e:
             log.warning("notify_admin failed: %s", e)
     return await _send_to_leads(text)
@@ -195,14 +199,13 @@ def build_lead(kind: str, m: Message, company: str, task: str, contact: str) -> 
         return (s[: n-1] + "…") if len(s) > n else s
     comp2 = cut(comp, comp_max)
     tsk2  = cut(tsk,  tsk_max)
-    body2 = (
+    txt2 = base + (
         f"Компания: {esc(comp2) or '—'}\n"
         f"Задача: {esc(tsk2) or '—'}\n"
         f"Контакт: {esc(cnt) or '—'}\n"
         f"(обрезано)\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     )
-    txt2 = base + body2
     if len(txt2) > MAX_TG:
         tsk2 = cut(tsk2, max(120, tsk_max - (len(txt2) - MAX_TG + 20)))
         txt2 = base + (
@@ -260,8 +263,10 @@ async def on_start(m: Message):
         await m.answer_photo(FSInputFile(hero), caption=header())
     except Exception:
         pass
-    await m.answer("Демо-бот: квиз, кейсы, запись. Нажмите кнопку ниже 👇",
-                   reply_markup=main_kb(is_private=(m.chat.type == "private")))
+    await m.answer(
+        "Демо-бот: квиз, кейсы, запись. Нажмите кнопку ниже 👇",
+        reply_markup=main_kb(is_private=(m.chat.type == "private"))
+    )
 
 @dp.message(Command("menu"))
 async def on_menu(m: Message):
@@ -505,7 +510,7 @@ async def quiz_done(m: Message, state: FSMContext):
         f"Срок: {esc(data.get('deadline'))}\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     )
-    await m.answer("Спасибо! Заявка получена 🎉", reply_markup=main_kb(is_private=(m.chat.type == "private")))
+    await m.answer("Ваша анкета отправлена, спасибо! ✅", reply_markup=main_kb(is_private=(m.chat.type == "private")))
     await notify_admin(msg)
 
 # --- Приём данных из WebApp ---
@@ -529,15 +534,20 @@ async def on_webapp_data(m: Message):
     txt = build_lead("WebApp", m, comp, task, contact)
     delivered = await notify_admin(txt)
 
-    # 3) подтверждение пользователю
+    # 3) подтверждение пользователю — точная фраза
     if delivered:
-        ack = "Спасибо! Заявка отправлена ✅\n(доставлено в лид-чат и админу)"
+        ack = "Ваша анкета отправлена, спасибо! ✅\n(доставлено в лид-чат и админу)"
     else:
-        ack = "Спасибо! Заявка отправлена ✅\n" + ("(заголовок уже в лид-чате; полная карточка у админа)" if header_ok else "⚠️ Лид-чат недоступен — админ уведомлён.")
+        ack = "Ваша анкета отправлена, спасибо! ✅\n" + (
+            "(заголовок уже в лид-чате; полная карточка у админа)" if header_ok
+            else "⚠️ Лид-чат временно недоступен — админ уведомлён."
+        )
     await m.answer(ack, reply_markup=main_kb(is_private=(m.chat.type == "private")))
 
-# --- HTTP-fallback для браузера ---
+# ---------- FASTAPI ----------
 app = FastAPI(title="Vimly — Client Demo Bot (WebApp)")
+
+# HTTP-fallback для браузера
 @app.post("/webapp/submit")
 async def webapp_submit(payload: dict = Body(...)):
     comp    = (payload.get("company") or "").strip()[:20000]
@@ -556,53 +566,6 @@ async def webapp_submit(payload: dict = Body(...)):
     await notify_admin(txt)
     return {"ok": True}
 
-# --- Заказ (контакт) ---
-@dp.callback_query(F.data == "go_order")
-async def order_start(c: CallbackQuery, state: FSMContext):
-    if not Store.accepting:
-        return await c.answer("Приём заявок временно закрыт", show_alert=True)
-    await state.set_state(Order.contact)
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, keyboard=[[
-        KeyboardButton(text="Отправить мой номер", request_contact=True),
-    ]])
-    await c.message.answer("Оставьте телефон или напишите контакт (телеграм/почта):", reply_markup=kb)
-    await c.answer()
-
-@dp.message(Order.contact, F.contact)
-async def order_contact_obj(m: Message, state: FSMContext):
-    phone = sanitize_phone(m.contact.phone_number)
-    await finalize_order(m, state, phone=phone)
-
-@dp.message(Order.contact)
-async def order_contact_text(m: Message, state: FSMContext):
-    phone = sanitize_phone(m.text)
-    await finalize_order(m, state, phone=phone, raw=m.text)
-
-async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], raw: Optional[str] = None):
-    await state.clear()
-    Store.stats["orders"] += 1
-    clean = phone or (raw.strip() if raw else "—")
-    msg = (
-        "🛒 Заказ/контакт\n"
-        f"От: {ufmt(m)}\n"
-        f"Контакт: {esc(clean)}\n"
-        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
-    )
-    await m.answer("Спасибо! Мы на связи.", reply_markup=ReplyKeyboardRemove())
-    await m.answer("Главное меню:", reply_markup=main_kb(is_private=(m.chat.type == "private")))
-    await notify_admin(msg)
-
-# --- Error handler (aiogram 3.7+: event с атрибутом exception) ---
-@dp.error()
-async def on_error(event):
-    exc = getattr(event, "exception", None)
-    try:
-        await notify_admin(f"⚠️ Ошибка: {html.escape(repr(exc))}")
-    except Exception:
-        pass
-    logging.exception("Handler error: %s", exc)
-
-# ---------- FASTAPI статика и страницы ----------
 # статика WebApp (html=True раздаёт index.html в папках)
 STATIC_ROOT = os.path.join(os.path.dirname(__file__), "webapp")
 if os.path.isdir(STATIC_ROOT):
@@ -625,6 +588,7 @@ button#send{background:#111;color:#fff}</style></head><body>
 <button id="send">Отправить</button></div>
 <script>(function(){
   const tg = window.Telegram && Telegram.WebApp ? Telegram.WebApp : null;
+  const card = document.querySelector('.card');
   const btn = document.getElementById('send');
   async function send(){
     const payload = {
@@ -642,13 +606,13 @@ button#send{background:#111;color:#fff}</style></head><body>
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify(payload)
         });
-        alert('Заявка отправлена. Спасибо!');
+        card.innerHTML = '<h3>Ваша анкета отправлена, спасибо! ✅</h3><p>Мы свяжемся с вами в ближайшее время.</p>';
       }catch(e){
-        alert('Не удалось отправить заявку: '+e);
+        card.insertAdjacentHTML('beforeend','<p style="color:#b00">Не удалось отправить заявку: '+e+'</p>');
       }
     }
   }
-  if (tg){ tg.expand(); tg.ready(); }
+  if(tg){ tg.expand(); tg.ready(); }
   btn.addEventListener('click', send);
 })();</script>
 </body></html>"""
@@ -692,6 +656,16 @@ async def webhook(request: Request):
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return {"ok": True}
+
+# --- Error handler (aiogram 3.7+: event с атрибутом exception) ---
+@dp.error()
+async def on_error(event):
+    exc = getattr(event, "exception", None)
+    try:
+        await notify_admin(f"⚠️ Ошибка: {html.escape(repr(exc))}")
+    except Exception:
+        pass
+    logging.exception("Handler error: %s", exc)
 
 # ---------- LIFECYCLE ----------
 @app.on_event("startup")
