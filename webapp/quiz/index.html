@@ -36,7 +36,7 @@
   <script>
 (function(){
   const tg = window.Telegram && Telegram.WebApp ? Telegram.WebApp : null;
-  const card = document.querySelector('.card');
+  const card = document.querySelector('.wrap') || document.body;
   const btn = document.getElementById('send');
 
   async function send(){
