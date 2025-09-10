@@ -433,7 +433,7 @@ async def cb_process(c: CallbackQuery):
            "4) <b>Поддержка</b> — рассылки, правки, отчёты")
     await safe_edit(c, txt); await c.answer()
 
-@dp.callback_query(F.data == "go_cases"))
+@dp.callback_query(F.data == "go_cases")
 async def cb_cases(c: CallbackQuery):
     txt = ("Кейсы (демо):\n"
            "• Барбершоп — запись и отзывы\n"
@@ -442,7 +442,7 @@ async def cb_cases(c: CallbackQuery):
            "• Коворкинг — афиша/RSVP")
     await safe_edit(c, txt); await c.answer()
 
-@dp.callback_query(F.data == "go_prices"))
+@dp.callback_query(F.data == "go_prices")
 async def cb_prices(c: CallbackQuery):
     txt = ("<b>Пакеты и цены:</b>\n\n"
            "• <b>Lite</b> — 15–20k ₽\n"
@@ -452,7 +452,7 @@ async def cb_prices(c: CallbackQuery):
     await safe_edit(c, txt); await c.answer()
 
 # --- Контакты + «написать админу» ---
-@dp.callback_query(F.data == "go_contacts"))
+@dp.callback_query(F.data == "go_contacts")
 async def cb_contacts(c: CallbackQuery, state: FSMContext):
     if c.message.chat.type != "private":
         url = deep_link("contact")
@@ -470,7 +470,7 @@ async def cb_contacts(c: CallbackQuery, state: FSMContext):
                                                             keyboard=[[KeyboardButton(text="Отмена")]]))
     await state.set_state(AdminMsg.text); await c.answer()
 
-@dp.callback_query(F.data == "admin_open"))
+@dp.callback_query(F.data == "admin_open")
 async def cb_admin_open(c: CallbackQuery):
     if not is_admin(c.from_user.id):
         await c.answer("Только для владельца бота", show_alert=True); return
@@ -534,7 +534,7 @@ async def contact_any(m: Message, state: FSMContext):
                    reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
 
 # --- Подарок ---
-@dp.callback_query(F.data == "go_gift"))
+@dp.callback_query(F.data == "go_gift")
 async def cb_gift(c: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📄 Чек-лист PDF", callback_data="gift_pdf"),
@@ -565,7 +565,7 @@ async def cb_gift_pdf(c: CallbackQuery):
         await c.message.answer(f"Не удалось отправить PDF: <code>{esc(str(e))}</code>")
     await c.answer()
 
-@dp.callback_query(F.data == "gift_promo"))
+@dp.callback_query(F.data == "gift_promo")
 async def cb_gift_promo(c: CallbackQuery):
     uid = c.from_user.id
     promo = Store.promos.get(uid) or gen_promo_for(uid)
@@ -582,7 +582,7 @@ async def cb_gift_promo(c: CallbackQuery):
     await c.answer()
 
 # --- Заказ (контакт) ---
-@dp.callback_query(F.data == "go_order"))
+@dp.callback_query(F.data == "go_order")
 async def order_start(c: CallbackQuery, state: FSMContext):
     if not Store.accepting:
         return await c.answer("Приём заявок временно закрыт", show_alert=True)
@@ -622,7 +622,7 @@ async def finalize_order(m: Message, state: FSMContext, phone: Optional[str], ra
         await m.answer(LEADS_FAIL_MSG)
 
 # --- Чат-квиз (ForceReply) ---
-@dp.callback_query(F.data == "go_quiz"))
+@dp.callback_query(F.data == "go_quiz")
 async def quiz_start(c: CallbackQuery, state: FSMContext):
     if not Store.accepting:
         return await c.answer("Приём заявок временно закрыт", show_alert=True)
