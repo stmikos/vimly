@@ -33,6 +33,37 @@
     </footer>
   </div>
 
-  <script src="./script.js"></script>
+  <script>
+(function(){
+  const tg = window.Telegram && Telegram.WebApp ? Telegram.WebApp : null;
+  const btn = document.getElementById('send');
+  async function send(){
+    const payload = {
+      company: document.getElementById('company').value||"",
+      task: document.getElementById('task').value||"",
+      contact: document.getElementById('contact').value||""
+    };
+    if (tg && tg.sendData){
+      tg.sendData(JSON.stringify(payload));
+      tg.close();
+    } else {
+      // Fallback: отправим напрямую на сервер
+      try{
+        await fetch('/webapp/submit', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        alert('Заявка отправлена. Спасибо!');
+      }catch(e){
+        alert('Не удалось отправить заявку: '+e);
+      }
+    }
+  }
+  if (tg){ tg.expand(); tg.ready(); }
+  btn.addEventListener('click', send);
+})();
+</script>
+
 </body>
 </html>
