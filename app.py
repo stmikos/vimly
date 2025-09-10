@@ -424,7 +424,7 @@ async def cb_hide_menu(c: CallbackQuery):
 @dp.callback_query(F.data == "go_menu")
 async def cb_menu(c: CallbackQuery): await safe_edit(c, "Главное меню:")
 
-@dp.callback_query(F.data == "go_process"))
+@dp.callback_query(F.data == "go_process")
 async def cb_process(c: CallbackQuery):
     txt = ("Как запускаем за 1–3 дня:\n"
            "1) <b>Созвон 15 минут</b> — фиксируем цели\n"
@@ -543,7 +543,7 @@ async def cb_gift(c: CallbackQuery):
     ])
     await safe_edit(c, "<b>Выберите подарок</b>: чек-лист PDF или промокод −20% на Lite (72ч).", kb); await c.answer()
 
-@dp.callback_query(F.data == "gift_pdf"))
+@dp.callback_query(F.data == "gift_pdf")
 async def cb_gift_pdf(c: CallbackQuery):
     uid = c.from_user.id
     pdf_path = os.path.join(os.path.dirname(__file__), "assets", "gifts", "checklist.pdf")
@@ -555,6 +555,7 @@ async def cb_gift_pdf(c: CallbackQuery):
         else:
             await c.message.answer(caption)
         Store.gift_claimed.add(uid)
+
         delivered = await notify_admin(
             f"🎁 PDF чек-лист выдан: {c.from_user.full_name} (@{c.from_user.username or '—'})"
         )
