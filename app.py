@@ -123,6 +123,24 @@ async def _send_to_leads(text: str) -> bool:
         log.error("LEADS_CHAT_ID invalid/empty: %r", LEADS_RAW)
         return False
     try:
+        chat = None
+        try:
+            chat = await bot.get_chat(target)
+            if getattr(chat, "is_forum", False) and not LEADS_THREAD_ID:
+                log.error("LEADS_THREAD_ID required: chat has topics enabled")
+                if ADMIN_CHAT_ID:
+                    try:
+                        await bot.send_message(
+                            ADMIN_CHAT_ID,
+                            "⚠️ В лид-чате включены темы — укажите корректный LEADS_THREAD_ID.",
+                            disable_notification=True,
+                        )
+                    except Exception:
+                        pass
+                return False
+        except Exception as e:
+            log.debug("get_chat failed for %r: %s", LEADS_RAW, e)
+
         kwargs = {"disable_web_page_preview": True}
         if LEADS_THREAD_ID:
             kwargs["message_thread_id"] = LEADS_THREAD_ID
