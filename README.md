@@ -33,3 +33,10 @@ MODE=polling python app.py
    - `BRAND_TAGLINE` — `Боты, которые продают`
    - `BRAND_TG` — `@Vimly_bot` (замените на свой)
    - `BRAND_SITE` — сайт/портфолио (опционально)
+   - `LEADS_CHAT_ID` — чат, куда прилетают лиды
+   - `LEADS_THREAD_ID` — ID темы в `LEADS_CHAT_ID`. Получить: в нужном топике скопируйте ссылку на сообщение и возьмите число после `topic=`.
+     Обязателен, если в `LEADS_CHAT_ID` включены темы (форум). Пример добавления в `.env`:
+
+     ```env
+     LEADS_THREAD_ID=123
+     ```
