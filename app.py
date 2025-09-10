@@ -16,6 +16,7 @@ Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
 import os, logging, re, asyncio, json, html, secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from fastapi import Body
 
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse
@@ -626,6 +627,30 @@ async def webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
+@app.post("/webapp/submit")
+async def webapp_submit(payload: dict = Body(...)):
+    # Пытаемся выжать поля
+    comp    = (payload.get("company") or "").strip()[:20000]
+    task    = (payload.get("task") or "").strip()[:20000]
+    contact = (payload.get("contact") or "").strip()[:500]
+
+    # Т.к. это браузер — у нас нет Telegram-профиля. Помечаем явно.
+    pseudo_user = type("U", (), {"full_name": "Браузерный посетитель", "username": None, "id": 0})
+    pseudo_msg = type("M", (), {"from_user": pseudo_user})
+
+    header_ok = await _send_to_leads("📥 Новая заявка (WebApp/браузер)")
+    txt = (
+        "🧪 Заявка (WebApp/браузер)\n"
+        "От: неизвестно (форма из браузера)\n"
+        f"Компания: {esc(comp) or '—'}\n"
+        f"Задача: {esc(task) or '—'}\n"
+        f"Контакт: {esc(contact) or '—'}\n"
+        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    )
+    # дублируем админу и в лид-чат
+    await notify_admin(txt)
+    return {"ok": True, "lead_header": header_ok}
+    
 # ---------- LIFECYCLE ----------
 @app.on_event("startup")
 async def on_startup():
