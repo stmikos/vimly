@@ -2,16 +2,11 @@
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
 
-Включает:
-- Контекстная клавиатура:
-  • в ЛС: «Квиз (в Telegram)» (WebApp) + «Квиз (в браузере)»
-  • в группах: «Квиз (в чате)» + «Квиз (в браузере)»
-- WebApp-заявки: сначала короткий хедер в лид-чат, затем полная карточка (с безопасной обрезкой под лимит)
-- Явное подтверждение пользователю: «Ваша анкета отправлена, спасибо!»
-- HTTP-fallback /webapp/submit — заявки из браузера тоже улетают в лид-чат и админу
-- Диагностика: /check_leads, /test_leads, /chatid, /threadid
-- 🎁 Подарок: PDF чек-лист + промокод (72ч)
-- Статика /webapp/quiz/ (+встроенный fallback HTML), favicon, HEAD-роуты
+Изменения:
+- ❌ Убран «Бриф»
+- 📨 В «Контактах» добавлена функция «✍️ Написать админу» (FSM, пересылка админу)
+- 🔐 Кнопка «🛠 Админ» видна только админу; в панели — счётчик юзеров и метрики
+- 🧪 Квиз: WebApp + браузерный fallback; добавлен telegram webapp js в HTML
 """
 
 import os, logging, re, asyncio, json, html, secrets
@@ -57,7 +52,6 @@ if not BOT_TOKEN:
 
 ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
 
-# Лид-чат: -100… (супергруппа/канал) или @username канала
 LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()
 LEADS_THREAD_ID = int((os.getenv("LEADS_THREAD_ID") or "0").strip() or "0")
 
@@ -84,7 +78,9 @@ dp = Dispatcher()
 # ---------- STORE ----------
 class Store:
     accepting = True
-    stats = {"starts": 0, "quiz": 0, "orders": 0, "webquiz": 0}
+    started_at = datetime.now(timezone.utc)
+    users = set()  # уникальные пользователи /start
+    stats = {"starts": 0, "quiz": 0, "orders": 0, "webquiz": 0, "contact_msgs": 0}
 Store.promos = {}
 Store.gift_claimed = set()
 
@@ -96,6 +92,9 @@ class Quiz(StatesGroup):
 
 class Order(StatesGroup):
     contact = State()
+
+class AdminMsg(StatesGroup):
+    text = State()
 
 # ---------- HELPERS ----------
 def esc(s: Optional[str]) -> str:
@@ -120,7 +119,6 @@ def parse_leads_target(s: str):
     except ValueError: return None
 
 async def _send_to_leads(text: str) -> bool:
-    """Постит в лид-чат. True — доставлено, False — ошибка (алерт админу внутри)."""
     target = parse_leads_target(LEADS_RAW)
     if not target:
         log.error("LEADS_CHAT_ID is empty or invalid: %r", LEADS_RAW)
@@ -130,7 +128,7 @@ async def _send_to_leads(text: str) -> bool:
         if LEADS_THREAD_ID:
             kwargs["message_thread_id"] = LEADS_THREAD_ID
         msg = await bot.send_message(target, text, **kwargs)
-        log.info("Lead → chat_id=%s thread=%s msg_id=%s", LEADS_RAW, LEADS_THREAD_ID or "—", getattr(msg, "message_id", "—"))
+        log.info("Lead → chat=%s thread=%s msg_id=%s", LEADS_RAW, LEADS_THREAD_ID or "—", getattr(msg, "message_id", "—"))
         return True
     except Exception as e:
         log.warning("notify_leads failed (%r): %s", LEADS_RAW, e)
@@ -153,9 +151,12 @@ async def notify_admin(text: str) -> bool:
             log.warning("notify_admin failed: %s", e)
     return await _send_to_leads(text)
 
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID != 0
+
 async def safe_edit(c: CallbackQuery, html_text: str, kb: Optional[InlineKeyboardMarkup] = None):
     if kb is None:
-        kb = main_kb(is_private=(c.message.chat.type == "private"))
+        kb = main_kb(is_private=(c.message.chat.type == "private"), is_admin=is_admin(c.from_user.id))
     m = c.message
     try:
         if getattr(m, "content_type", None) in {"photo","video","animation","document","audio","voice","video_note"}:
@@ -177,7 +178,7 @@ def gen_promo_for(user_id: int) -> dict:
     Store.promos[user_id] = data
     return data
 
-MAX_TG = 3900  # запас под лимит 4096
+MAX_TG = 3900
 def build_lead(kind: str, m: Message, company: str, task: str, contact: str) -> str:
     base = f"🧪 Заявка ({kind})\nОт: {ufmt(m)}\n"
     comp = (company or "").strip()
@@ -222,8 +223,8 @@ async def send_lead_header(kind: str, m: Message) -> bool:
     return await _send_to_leads(head)
 
 # ---------- UI ----------
-def main_kb(is_private: bool) -> InlineKeyboardMarkup:
-    # WebApp — только в личке; везде добавляем браузерный fallback
+def main_kb(is_private: bool, is_admin: bool) -> InlineKeyboardMarkup:
+    # Квиз: WebApp в ЛС / чат-квиз в группах + всегда браузерный fallback
     webapp_btn = (
         InlineKeyboardButton(
             text="🧪 Квиз (в Telegram)",
@@ -232,13 +233,9 @@ def main_kb(is_private: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🧪 Квиз (в чате)", callback_data="go_quiz")
     )
     browser_btn = InlineKeyboardButton(
-        text="🌐 Квиз (в браузере)",
-        url=f"{BASE_URL}/webapp/quiz/"
+        text="🌐 Квиз (в браузере)", url=f"{BASE_URL}/webapp/quiz/"
     ) if BASE_URL else None
-
-    row_quiz = [webapp_btn]
-    if browser_btn:
-        row_quiz.append(browser_btn)
+    row_quiz = [webapp_btn] + ([browser_btn] if browser_btn else [])
 
     rows = [
         [InlineKeyboardButton(text="🧭 Процесс", callback_data="go_process"),
@@ -247,17 +244,18 @@ def main_kb(is_private: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💸 Пакеты и цены", callback_data="go_prices"),
          InlineKeyboardButton(text="🛒 Заказать", callback_data="go_order")],
         [InlineKeyboardButton(text="📬 Контакты", callback_data="go_contacts"),
-         InlineKeyboardButton(text="📝 Бриф (7 вопросов)", callback_data="go_brief")],
-        [InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift")],
+         InlineKeyboardButton(text="🎁 Подарок", callback_data="go_gift")],
         [InlineKeyboardButton(text="↘ Скрыть меню", callback_data="hide_menu")],
-        [InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open")],
     ]
+    if is_admin:
+        rows.append([InlineKeyboardButton(text="🛠 Админ", callback_data="admin_open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # ---------- HANDLERS ----------
 @dp.message(CommandStart())
 async def on_start(m: Message):
     Store.stats["starts"] += 1
+    Store.users.add(m.from_user.id)
     hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
     try:
         await m.answer_photo(FSInputFile(hero), caption=header())
@@ -265,61 +263,31 @@ async def on_start(m: Message):
         pass
     await m.answer(
         "Демо-бот: квиз, кейсы, запись. Нажмите кнопку ниже 👇",
-        reply_markup=main_kb(is_private=(m.chat.type == "private"))
+        reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id))
     )
 
 @dp.message(Command("menu"))
 async def on_menu(m: Message):
-    await m.answer("Главное меню:", reply_markup=main_kb(is_private=(m.chat.type == "private")))
-
-@dp.message(Command("admin"))
-async def on_admin(m: Message):
-    if m.from_user.id != ADMIN_CHAT_ID:
-        return await m.answer("Админ-панель доступна владельцу бота.")
-    await m.answer("Админ-панель:", reply_markup=main_kb(is_private=True))
-
-@dp.message(Command("chatid"))
-async def cmd_chatid(m: Message):
-    await m.answer(f"chat_id: <code>{m.chat.id}</code>")
-
-@dp.message(Command("threadid"))
-async def cmd_threadid(m: Message):
-    tid = getattr(m, "message_thread_id", None)
-    await m.answer(f"thread_id: <code>{tid}</code>")
-
-@dp.channel_post(Command("chatid"))
-async def channel_chatid(m: Message):
-    await m.answer(f"chat_id: <code>{m.chat.id}</code>")
-
-@dp.channel_post(Command("threadid"))
-async def channel_threadid(m: Message):
-    tid = getattr(m, "message_thread_id", None)
-    await m.answer(f"thread_id: <code>{tid}</code>")
+    await m.answer("Главное меню:", reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
 
 # --- Диагностика лид-чата ---
 @dp.message(Command("check_leads"))
 async def check_leads(m: Message):
     target_raw = LEADS_RAW
-
     def _parse(s: str):
         s = (s or "").strip()
         if not s: return None
         if s.startswith("@"): return s
         try: return int(s)
         except ValueError: return None
-
     target = _parse(target_raw)
     if not target:
         return await m.answer("LEADS_CHAT_ID не задан или некорректен.")
-
     try:
         me = await bot.get_me()
         chat = await bot.get_chat(target)
         member = await bot.get_chat_member(chat.id, me.id)
-
-        def g(obj, attr, default="—"):
-            return getattr(obj, attr, default)
-
+        def g(obj, attr, default="—"): return getattr(obj, attr, default)
         info = (
             "📊 Лид-чат найден:\n"
             f"• chat.id: <code>{chat.id}</code>\n"
@@ -336,8 +304,7 @@ async def check_leads(m: Message):
 
 @dp.message(Command("test_leads"))
 async def test_leads_cmd(m: Message):
-    if m.from_user.id != ADMIN_CHAT_ID:
-        return
+    if not is_admin(m.from_user.id): return
     def _parse(s: str):
         s = (s or "").strip()
         if not s: return None
@@ -357,12 +324,6 @@ async def test_leads_cmd(m: Message):
         await m.answer(f"❌ Не отправилось в {LEADS_RAW!r}:\n<code>{e}</code>")
 
 # --- Меню / контент ---
-@dp.callback_query(F.data == "admin_open")
-async def cb_admin_open(c: CallbackQuery):
-    if c.from_user.id != ADMIN_CHAT_ID:
-        await c.answer("Только владелец бота", show_alert=True); return
-    await safe_edit(c, "Админ-панель:")
-
 @dp.callback_query(F.data == "hide_menu")
 async def cb_hide_menu(c: CallbackQuery):
     try:
@@ -412,25 +373,60 @@ async def cb_prices(c: CallbackQuery):
     )
     await safe_edit(c, txt); await c.answer()
 
+# --- Контакты + «написать админу» ---
 @dp.callback_query(F.data == "go_contacts")
-async def cb_contacts(c: CallbackQuery):
+async def cb_contacts(c: CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Написать админу", callback_data="contact_admin")],
+        [InlineKeyboardButton(text="⬅️ Меню", callback_data="go_menu")],
+    ])
     txt = (
-        "<b>Контакты:</b>\n"
+        "<b>Контакты</b>\n"
         f"Telegram: {esc(BRAND_TG)}\n"
         f"Сайт/портфолио: {esc(BRAND_SITE) or '—'}\n\n"
-        "Оставьте телефон — свяжемся."
+        "Нажмите «✍️ Написать админу», чтобы отправить сообщение."
     )
-    await safe_edit(c, txt); await c.answer()
+    await safe_edit(c, txt, kb); await c.answer()
 
-@dp.callback_query(F.data == "go_brief")
-async def cb_brief(c: CallbackQuery):
-    txt = (
-        "<b>Мини-бриф (7 вопросов):</b>\n"
-        "1) Ниша и город\n2) Цель бота\n3) Кнопки меню\n"
-        "4) Что слать в админ-чат\n5) Нужны Sheets/рассылки\n"
-        "6) Нужна оплата/доступ\n7) Срок и бюджет"
-    )
-    await safe_edit(c, txt); await c.answer()
+@dp.callback_query(F.data == "contact_admin")
+async def cb_contact_admin(c: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminMsg.text)
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, keyboard=[
+        [KeyboardButton(text="Отмена")]
+    ])
+    await c.message.answer("Напишите сообщение админу. Можно текст/фото/видео/голос.\nНапишите «Отмена» чтобы выйти.", reply_markup=kb)
+    await c.answer()
+
+@dp.message(AdminMsg.text, F.text.casefold() == "отмена")
+async def contact_cancel(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("Отменено.", reply_markup=ReplyKeyboardRemove())
+    await m.answer("Главное меню:", reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
+
+@dp.message(AdminMsg.text, F.text)
+async def contact_text(m: Message, state: FSMContext):
+    Store.stats["contact_msgs"] += 1
+    if ADMIN_CHAT_ID:
+        txt = f"✉️ Сообщение админу от {ufmt(m)}:\n\n{esc(m.text)}"
+        await bot.send_message(ADMIN_CHAT_ID, txt, disable_web_page_preview=True)
+    await state.clear()
+    await m.answer("Сообщение отправлено админу. Спасибо!", reply_markup=ReplyKeyboardRemove())
+    await m.answer("Главное меню:", reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
+
+@dp.message(AdminMsg.text)
+async def contact_any(m: Message, state: FSMContext):
+    # Любой контент: отправим хедер + копию сообщения админу
+    Store.stats["contact_msgs"] += 1
+    if ADMIN_CHAT_ID:
+        head = f"✉️ Сообщение админу от {ufmt(m)} (медиа ниже)"
+        await bot.send_message(ADMIN_CHAT_ID, head)
+        try:
+            await bot.copy_message(ADMIN_CHAT_ID, from_chat_id=m.chat.id, message_id=m.message_id)
+        except Exception as e:
+            await bot.send_message(ADMIN_CHAT_ID, f"(не удалось скопировать медиа)\n<code>{esc(str(e))}</code>")
+    await state.clear()
+    await m.answer("Сообщение отправлено админу. Спасибо!", reply_markup=ReplyKeyboardRemove())
+    await m.answer("Главное меню:", reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
 
 # --- 🎁 Подарок ---
 @dp.callback_query(F.data == "go_gift")
@@ -476,6 +472,28 @@ async def cb_gift_promo(c: CallbackQuery):
     Store.gift_claimed.add(uid)
     await c.answer()
 
+# --- Админка ---
+@dp.callback_query(F.data == "admin_open")
+async def cb_admin_open(c: CallbackQuery):
+    if not is_admin(c.from_user.id):
+        await c.answer("Только для владельца бота", show_alert=True); return
+    uptime = datetime.now(timezone.utc) - Store.started_at
+    txt = (
+        "<b>🛠 Админ-панель</b>\n"
+        f"Uptime: {str(uptime).split('.',1)[0]}\n"
+        f"Уникальных пользователей: <b>{len(Store.users)}</b>\n"
+        f"Starts: {Store.stats['starts']}\n"
+        f"WebQuiz: {Store.stats['webquiz']}\n"
+        f"ChatQuiz: {Store.stats['quiz']}\n"
+        f"Orders: {Store.stats['orders']}\n"
+        f"Msgs→Admin: {Store.stats['contact_msgs']}\n"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Обновить", callback_data="admin_open")],
+        [InlineKeyboardButton(text="⬅️ Меню", callback_data="go_menu")]
+    ])
+    await safe_edit(c, txt, kb); await c.answer()
+
 # --- Fallback чат-квиз ---
 @dp.callback_query(F.data == "go_quiz")
 async def quiz_start(c: CallbackQuery, state: FSMContext):
@@ -510,7 +528,7 @@ async def quiz_done(m: Message, state: FSMContext):
         f"Срок: {esc(data.get('deadline'))}\n"
         f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
     )
-    await m.answer("Ваша анкета отправлена, спасибо! ✅", reply_markup=main_kb(is_private=(m.chat.type == "private")))
+    await m.answer("Ваша анкета отправлена, спасибо! ✅", reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
     await notify_admin(msg)
 
 # --- Приём данных из WebApp ---
@@ -527,22 +545,15 @@ async def on_webapp_data(m: Message):
     task    = (data.get("task") or "").strip()[:20000]
     contact = (data.get("contact") or "").strip()[:500]
 
-    # 1) короткий хедер — почти небьётся
     header_ok = await send_lead_header("WebApp", m)
-
-    # 2) полная карточка (с безопасной обрезкой)
     txt = build_lead("WebApp", m, comp, task, contact)
     delivered = await notify_admin(txt)
 
-    # 3) подтверждение пользователю — точная фраза
     if delivered:
         ack = "Ваша анкета отправлена, спасибо! ✅\n(доставлено в лид-чат и админу)"
     else:
-        ack = "Ваша анкета отправлена, спасибо! ✅\n" + (
-            "(заголовок уже в лид-чате; полная карточка у админа)" if header_ok
-            else "⚠️ Лид-чат временно недоступен — админ уведомлён."
-        )
-    await m.answer(ack, reply_markup=main_kb(is_private=(m.chat.type == "private")))
+        ack = "Ваша анкета отправлена, спасибо! ✅\n" + ("(заголовок уже в лид-чате; полная карточка у админа)" if header_ok else "⚠️ Лид-чат временно недоступен — админ уведомлён.")
+    await m.answer(ack, reply_markup=main_kb(is_private=(m.chat.type == "private"), is_admin=is_admin(m.from_user.id)))
 
 # ---------- FASTAPI ----------
 app = FastAPI(title="Vimly — Client Demo Bot (WebApp)")
@@ -553,7 +564,6 @@ async def webapp_submit(payload: dict = Body(...)):
     comp    = (payload.get("company") or "").strip()[:20000]
     task    = (payload.get("task") or "").strip()[:20000]
     contact = (payload.get("contact") or "").strip()[:500]
-    # Короткий хедер + полная карточка (без Telegram-пользователя)
     await _send_to_leads("📥 Новая заявка (WebApp/браузер)")
     txt = (
         "🧪 Заявка (WebApp/браузер)\n"
@@ -571,10 +581,11 @@ STATIC_ROOT = os.path.join(os.path.dirname(__file__), "webapp")
 if os.path.isdir(STATIC_ROOT):
     app.mount("/webapp", StaticFiles(directory=STATIC_ROOT, html=True), name="webapp")
 
-# явный роут /webapp/quiz (+fallback встроенная форма c POST на /webapp/submit)
+# явный роут /webapp/quiz (+fallback HTML c Telegram WebApp JS)
 FALLBACK_QUIZ_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Квиз-заявка</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;margin:0;padding:20px}
 .card{max-width:640px;margin:0 auto;padding:20px;border:1px solid #eee;border-radius:16px}
 label{display:block;margin:12px 0 6px;font-weight:600}
@@ -625,7 +636,7 @@ async def webapp_quiz():
         return FileResponse(index_path, media_type="text/html")
     return HTMLResponse(FALLBACK_QUIZ_HTML)
 
-# фавикон (чтобы не было 404)
+# фавикон
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     hero = os.path.join(os.path.dirname(__file__), "assets", "hero.png")
@@ -633,16 +644,14 @@ async def favicon():
         return FileResponse(hero, media_type="image/png")
     return Response(status_code=204)
 
-# HEAD-хендлеры (убирают 405 от пингов)
+# HEAD-хендлеры
 @app.head("/")
 async def head_root(): return Response(status_code=200)
-
 @app.head("/healthz")
 async def head_healthz(): return Response(status_code=200)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(): return f"<h3>{esc(BRAND_NAME)} — {esc(BRAND_TAGLINE)}</h3>"
-
 @app.get("/healthz", response_class=PlainTextResponse)
 async def healthz(): return "ok"
 
@@ -657,7 +666,7 @@ async def webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"ok": True}
 
-# --- Error handler (aiogram 3.7+: event с атрибутом exception) ---
+# --- Error handler ---
 @dp.error()
 async def on_error(event):
     exc = getattr(event, "exception", None)
