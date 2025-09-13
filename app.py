@@ -334,10 +334,6 @@ def main_kb(is_private: bool, is_admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # ---------- HANDLERS ----------
-@dp.message()
-async def any_msg_log(m: Message):
-    logging.info("ANY MSG: chat=%s type=%s text=%r", m.chat.id, m.chat.type, (m.text or ""))
-
 @dp.message(CommandStart())
 async def on_start(m: Message, state: FSMContext):
     Store.stats["starts"] += 1
