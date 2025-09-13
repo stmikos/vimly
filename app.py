@@ -928,6 +928,8 @@ async def healthz(): return "ok"
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
+    # временный лог
+    log.info("Webhook headers: %r", dict(request.headers))
     if WEBHOOK_SECRET:
         secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
         if secret != WEBHOOK_SECRET:
