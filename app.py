@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Vimly — Client Demo Bot (FastAPI + aiogram 3.7+)
-Переработано: заявки из квиза уходят ТОЛЬКО в лид-группу (одно сообщение).
-notify_admin() шлёт ТОЛЬКО админу (без дубля в группу).
+Пересборка: WebApp и браузерный квиз шлют ТОЛЬКО в лид-группу (одно сообщение).
+Добавлены: /stats, явные логи WEBAPP DATA RAW, безопасные ответы, самотесты.
 """
 
 import os, logging, re, asyncio, json, html, secrets
@@ -48,7 +48,7 @@ if not BOT_TOKEN:
 
 ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or "0")
 
-LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()         # "-100…"(группа) или "@channel"
+LEADS_RAW = (os.getenv("LEADS_CHAT_ID") or "").strip()   # "-100…"(группа) или "@channel"
 if not LEADS_RAW:
     logging.critical("Missing LEADS_CHAT_ID. Provide negative group ID like '-1001234567890' or '@channel'.")
     raise RuntimeError("Missing LEADS_CHAT_ID env var")
@@ -66,8 +66,7 @@ LEADS_FAIL_MSG = "⚠️ Лид-чат временно недоступен —
 BASE_URL = _norm_base_url(os.getenv("BASE_URL"))
 WEBHOOK_PATH = _norm_path(os.getenv("WEBHOOK_PATH") or "/telegram/webhook/vimly")
 WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
-MODE = (os.getenv("MODE") or "webhook").strip().lower()        # webhook | polling
-
+MODE = (os.getenv("MODE") or "webhook").strip().lower()  # webhook | polling
 ADMIN_DM_COOLDOWN_SEC = int((os.getenv("ADMIN_DM_COOLDOWN_SEC") or "60").strip() or "60")
 
 # ---------- BRAND ----------
@@ -93,8 +92,8 @@ class Store:
     stats = {"starts": 0, "quiz": 0, "orders": 0, "webquiz": 0, "contact_msgs": 0}
 Store.promos = {}
 Store.gift_claimed = set()
-Store.last_admin_dm = {}  # {user_id: datetime_utc}
-BOT_USERNAME = ""         # set on startup
+Store.last_admin_dm = {}
+BOT_USERNAME = ""
 
 # ---------- FSM ----------
 class Quiz(StatesGroup):
@@ -135,7 +134,7 @@ async def _send_to_leads(text: str) -> bool:
         log.error("LEADS_CHAT_ID invalid/empty: %r", LEADS_RAW)
         return False
     try:
-        # Проверим необходимость thread_id
+        # Проверим необходимость thread_id (если включены темы)
         try:
             chat = await bot.get_chat(target)
             if getattr(chat, "is_forum", False) and not LEADS_THREAD_ID:
@@ -167,9 +166,10 @@ async def _send_to_leads(text: str) -> bool:
         log.error("LEADS forbidden: %s (бот кикнут/нет прав)", e)
         if ADMIN_CHAT_ID:
             try:
-                await bot.send_message(ADMIN_CHAT_ID,
-                    "⚠️ Бот не может писать в лид-чат (возможно, кикнут/нет прав). "
-                    "Проверьте, что бот в чате и LEADS_CHAT_ID корректен.")
+                await bot.send_message(
+                    ADMIN_CHAT_ID,
+                    "⚠️ Бот не может писать в лид-чат (возможно, кикнут/нет прав). Проверьте, что бот в чате и LEADS_CHAT_ID корректен."
+                )
             except Exception: pass
         return False
     except Exception as e:
@@ -371,6 +371,11 @@ async def on_menu(m: Message):
     await m.answer("Главное меню:", reply_markup=main_kb(is_private=(m.chat.type == "private"),
                                                          is_admin=is_admin(m.from_user.id)))
 
+@dp.message(Command("stats"))
+async def on_stats(m: Message):
+    s = Store.stats
+    await m.answer(f"stats → starts={s['starts']}, webquiz={s['webquiz']}, chatquiz={s['quiz']}, orders={s['orders']}")
+
 @dp.message(Command("chatid"))
 async def cmd_chatid(m: Message): await m.answer(f"chat_id: <code>{m.chat.id}</code>")
 
@@ -505,14 +510,11 @@ async def cb_admin_open(c: CallbackQuery):
     if not is_admin(c.from_user.id):
         await c.answer("Только для владельца бота", show_alert=True); return
     uptime = datetime.now(timezone.utc) - Store.started_at
+    s = Store.stats
     txt = (f"<b>🛠 Админ-панель</b>\n"
            f"Uptime: {str(uptime).split('.',1)[0]}\n"
            f"Уникальных пользователей: <b>{len(Store.users)}</b>\n"
-           f"Starts: {Store.stats['starts']}\n"
-           f"WebQuiz: {Store.stats['webquiz']}\n"
-           f"ChatQuiz: {Store.stats['quiz']}\n"
-           f"Orders: {Store.stats['orders']}\n"
-           f"Msgs→Admin: {Store.stats['contact_msgs']}\n")
+           f"Starts: {s['starts']} | WebQuiz: {s['webquiz']} | ChatQuiz: {s['quiz']} | Orders: {s['orders']} | Msgs→Admin: {s['contact_msgs']}\n")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📈 Обновить", callback_data="admin_open")],
         [InlineKeyboardButton(text="⬅️ Меню", callback_data="go_menu")]
@@ -585,10 +587,7 @@ async def cb_gift_pdf(c: CallbackQuery):
         else:
             await c.message.answer(caption)
         Store.gift_claimed.add(uid)
-
-        # опционально пингануть админа (без дубля в группу)
         await notify_admin(f"🎁 PDF чек-лист выдан: {c.from_user.full_name} (@{c.from_user.username or '—'})")
-
     except Exception as e:
         await c.message.answer(f"Не удалось отправить PDF: <code>{esc(str(e))}</code>")
     await c.answer()
@@ -708,7 +707,10 @@ async def quiz_done(m: Message, state: FSMContext):
 @dp.message(F.web_app_data)
 async def on_webapp_data(m: Message):
     Store.stats["webquiz"] += 1
+
     raw = m.web_app_data.data
+    log.info("WEBAPP DATA RAW: %s", raw)
+
     try:
         data = json.loads(raw)
     except Exception:
@@ -724,7 +726,8 @@ async def on_webapp_data(m: Message):
         await m.answer(f"❗️{err}")
         return
 
-    # ОДНО сообщение — сразу полная карточка в лид-чат
+    await m.answer("📥 Приняли данные из WebApp, отправляю в лид-чат…")
+
     txt = build_lead("WebApp", m, comp, task, contact)
     delivered = await _send_to_leads(txt)
 
