@@ -188,12 +188,17 @@ async def _send_to_leads(text: str) -> bool:
         return False
 
 async def notify_admin(text: str) -> bool:
+    ok = True
     if ADMIN_CHAT_ID:
         try:
-            await bot.send_message(ADMIN_CHAT_ID, text, disable_notification=True, disable_web_page_preview=True)
+            await bot.send_message(
+                ADMIN_CHAT_ID, text,
+                disable_notification=True, disable_web_page_preview=True
+            )
         except Exception as e:
             log.warning("notify_admin failed: %s", e)
-    return await _send_to_leads(text)
+            ok = False
+    return ok
 
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_CHAT_ID and ADMIN_CHAT_ID != 0
@@ -763,15 +768,19 @@ async def webapp_submit(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": err}, status_code=400)
 
     header_ok = await _send_to_leads("📥 Новая заявка (WebApp/браузер)")
-    txt = ("🧪 Заявка (WebApp/браузер)\n"
-           "От: неизвестно (браузер)\n"
-           f"Компания: {esc(comp)}\n"
-           f"Задача: {esc(task)}\n"
-           f"Контакт: {esc(contact)}\n"
-           f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}")
-    delivered = await notify_admin(txt)
-    if not (header_ok and delivered):
-        return JSONResponse({"ok": False, "error": "leads_unavailable"}, status_code=503)
+    txt = (
+        "🧪 Заявка (WebApp/браузер)\n"
+        "От: неизвестно (браузер)\n"
+        f"Компания: {esc(comp)}\n"
+        f"Задача: {esc(task)}\n"
+        f"Контакт: {esc(contact)}\n"
+        f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    )
+    admin_ok = await notify_admin(txt)
+
+    if not (header_ok or admin_ok):
+        return JSONResponse({"ok": False, "error": "delivery_failed"}, status_code=503)
+
     return {"ok": True}
 
 # статика WebApp (если есть папка webapp)
