@@ -781,9 +781,16 @@ button{margin-top:16px;padding:12px 16px;border:0;border-radius:12px;cursor:poin
 button#send{background:#111;color:#fff;opacity:.9}
 button#send[disabled]{opacity:.4;cursor:not-allowed}
 .notice{margin-top:8px;color:#666}
+.warn{display:none;padding:12px;border-radius:10px;margin:10px 0;background:#fff3cd;border:1px solid #ffeeba;color:#856404}
 </style></head><body>
 <div class="card">
   <h3>Квиз-заявка</h3>
+
+  <div id="warn" class="warn">
+    Похоже, вы открыли форму в браузере. Чтобы анкета ушла прямо в Telegram и бот ответил в чате,
+    откройте её из диалога с ботом по кнопке «🧪 Квиз (в Telegram)».
+  </div>
+
   <label>Описание компании</label>
   <textarea id="company" rows="3" placeholder="Чем занимаетесь?" required minlength="3"></textarea>
   <small id="e_company" class="err" style="display:none"></small>
@@ -800,11 +807,14 @@ button#send[disabled]{opacity:.4;cursor:not-allowed}
   <div class="notice">Все поля обязательны</div>
 </div>
 <script>(function(){
-  const tg = window.Telegram && Telegram.WebApp ? Telegram.WebApp : null;
-  const $ = (id)=>document.getElementById(id);
+  const tg = (window.Telegram && Telegram.WebApp) ? Telegram.WebApp : null;
+  const $  = (id)=>document.getElementById(id);
   const fields = ["company","task","contact"];
   const errs = {company:$("e_company"), task:$("e_task"), contact:$("e_contact")};
   const btn = $("send");
+
+  // показать предупреждение, если это не Telegram WebView
+  if (!tg) { $("warn").style.display = "block"; }
 
   function isValidContact(v){
     v = (v||"").trim();
@@ -819,12 +829,16 @@ button#send[disabled]{opacity:.4;cursor:not-allowed}
     const company = $("company").value.trim();
     const task    = $("task").value.trim();
     const contact = $("contact").value.trim();
+
     if (!company || company.length<3){ ok=false; if(show){ errs.company.textContent="Минимум 3 символа"; errs.company.style.display="block"; } }
     else if(show){ errs.company.style.display="none"; }
+
     if (!task || task.length<5){ ok=false; if(show){ errs.task.textContent="Минимум 5 символов"; errs.task.style.display="block"; } }
     else if(show){ errs.task.style.display="none"; }
+
     if (!contact || !isValidContact(contact)){ ok=false; if(show){ errs.contact.textContent="Укажи @username, телефон или email"; errs.contact.style.display="block"; } }
     else if(show){ errs.contact.style.display="none"; }
+
     btn.disabled = !ok;
     if (tg && tg.MainButton){
       tg.MainButton.setText("Отправить");
@@ -838,37 +852,48 @@ button#send[disabled]{opacity:.4;cursor:not-allowed}
   async function send(){
     const ok = validate(true);
     if(!ok) return;
+
     const payload = {
       company: $("company").value.trim(),
       task: $("task").value.trim(),
-      contact: $("contact").value.trim()
+      contact: $("contact").value.trim(),
+      nonce: Math.random().toString(36).slice(2) + Date.now()  // для антидублей на сервере
     };
-    if (tg && tg.sendData){
-      tg.sendData(JSON.stringify(payload));
-      tg.close();
-    } else {
-      try{
-        const r = await fetch('/webapp/submit', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(payload)
-        });
-        if(!r.ok){
-          const j = await r.json().catch(()=>({error:"Ошибка отправки"}));
-          throw new Error(j.error||("HTTP "+r.status));
-        }
-        document.querySelector('.card').innerHTML = '<h3>Ваша анкета отправлена, спасибо! ✅</h3><p>Мы свяжемся с вами в ближайшее время.</p>';
-      }catch(e){
-        alert(e.message||e);
+
+    // 1) Пытаемся отдать данные в Telegram (если это WebApp)
+    try{
+      if (tg && tg.sendData) {
+        tg.sendData(JSON.stringify(payload));
       }
+    }catch(e){ console.log("tg.sendData failed:", e); }
+
+    // 2) Всегда бэкапим на сервер (уйдёт в лид-группу через /webapp/submit)
+    try{
+      const r = await fetch('/webapp/submit', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','X-From-WebApp':'1'},
+        body: JSON.stringify(payload)
+      });
+      if(!r.ok){
+        const j = await r.json().catch(()=>({error:"Ошибка отправки"}));
+        throw new Error(j.error||("HTTP "+r.status));
+      }
+      document.querySelector('.card').innerHTML =
+        '<h3>Ваша анкета отправлена, спасибо! ✅</h3><p>Мы свяжемся с вами в ближайшее время.</p>';
+    }catch(e){
+      alert(e.message||e);
+    }finally{
+      if (tg && tg.close) tg.close();
     }
   }
+
   if(tg){ tg.expand(); tg.ready(); }
   btn.addEventListener('click', send);
   if (tg && tg.MainButton){ tg.MainButton.onClick(send); }
   validate(false);
 })();</script>
 </body></html>"""
+
 
 @app.get("/webapp/quiz", response_class=HTMLResponse)
 @app.get("/webapp/quiz/", response_class=HTMLResponse)
