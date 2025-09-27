@@ -69,6 +69,73 @@ WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
 MODE = (os.getenv("MODE") or "webhook").strip().lower()  # webhook | polling
 ADMIN_DM_COOLDOWN_SEC = int((os.getenv("ADMIN_DM_COOLDOWN_SEC") or "60").strip() or "60")
 
+# ---------- PRICING ----------
+PRICING = {
+    "lite": {
+        "title": "Vimly Lite — 25 000–45 000 ₽",
+        "desc": (
+            "MVP за 1–3 дня: стартовое меню, квиз (WebApp + fallback), лид-чат, "
+            "мини-админка, подарки/промокоды, антиспам на «написать админу». "
+            "Идеально для быстрых тестов ниши."
+        ),
+        "bullets": [
+            "Меню, квиз (WebApp + fallback)",
+            "Лид-чат + мини-админка",
+            "Подарок/промокод, антиспам",
+            "Срок запуска: 1–3 дня",
+        ],
+    },
+    "start": {
+        "title": "Vimly Start — 60 000–120 000 ₽",
+        "desc": (
+            "Всё из Lite + интеграции (Google Sheets/Notion), базовая аналитика, "
+            "кастомные формы, простые платежи/заявки, кастомный дизайн квиза."
+        ),
+        "bullets": [
+            "Интеграции (Sheets/Notion)",
+            "Базовая аналитика",
+            "Кастомные формы и дизайн квиза",
+            "Простые оплаты/заявки",
+        ],
+    },
+    "pro": {
+        "title": "Vimly Pro — 120 000–300 000 ₽",
+        "desc": (
+            "Всё из Start + Mini App (WebApp) с расширенными сценариями, роли/права, "
+            "мультиканальность (по необходимости), базовый AI-ответчик/FAQ (безопасные пресеты), "
+            "RAG на ваших материалах, отчёты."
+        ),
+        "bullets": [
+            "Mini App со сценариями, роли/права",
+            "Мультиканальность при необходимости",
+            "AI-FAQ (безопасные пресеты), RAG",
+            "Отчёты и метрики",
+        ],
+    },
+    "ent": {
+        "title": "Vimly Enterprise — 300 000+ ₽",
+        "desc": (
+            "Кастом: нагруженные интеграции (CRM/1С/склады), сложные оплаты/подписки, "
+            "SSO/SLA, безопасность, CI/CD, нагрузочное, отдельные среды."
+        ),
+        "bullets": [
+            "CRM/1С/склады, сложные биллинги",
+            "SSO/SLA, безопасность",
+            "CI/CD, нагрузочное тестирование",
+            "Dev/Staging/Prod окружения",
+        ],
+    },
+    "support": {
+        "title": "Поддержка (ежемесячно)",
+        "desc": "Гибкие планы поддержки. Сторонние сервисы — отдельно по их тарифам.",
+        "bullets": [
+            "Care Basic — 5–9 тыс ₽/мес: мониторинг, мелкие фиксы, 1 релиз/мес",
+            "Care Plus — 15–25 тыс ₽/мес: до ~8–12 ч работ (≈1–2 спринта мелочей)",
+            "Care Scale — от 30 тыс ₽/мес: SLA, очередь задач, релизы каждую неделю",
+        ],
+    },
+}
+
 # ---------- BRAND ----------
 BRAND_NAME = (os.getenv("BRAND_NAME") or "Vimly").strip()
 BRAND_TAGLINE = (os.getenv("BRAND_TAGLINE") or "Боты, которые продают").strip()
@@ -108,6 +175,46 @@ class AdminMsg(StatesGroup):
     text = State()
 
 # ---------- HELPERS ----------
+def _bullets_html(items: list[str]) -> str:
+    return "\n".join(f"• {esc(x)}" for x in items)
+
+def prices_root_text() -> str:
+    return (
+        "<b>Пакеты и цены</b>\n\n"
+        "Выберите тариф, чтобы посмотреть состав и оформить заказ:\n\n"
+        "1) Vimly Lite — 25 000–45 000 ₽\n"
+        "2) Vimly Start — 60 000–120 000 ₽\n"
+        "3) Vimly Pro — 120 000–300 000 ₽\n"
+        "4) Vimly Enterprise — 300 000+ ₽\n"
+        "5) Поддержка (ежемесячно)\n\n"
+        "<i>Важно: сторонние сервисы (конструкторы/рассылки/сообщения) и трафик оплачиваются отдельно.</i>"
+    )
+
+def prices_root_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💡 Vimly Lite", callback_data="pkg_lite")],
+        [InlineKeyboardButton(text="🚀 Vimly Start", callback_data="pkg_start")],
+        [InlineKeyboardButton(text="⚡️ Vimly Pro", callback_data="pkg_pro")],
+        [InlineKeyboardButton(text="🏢 Enterprise", callback_data="pkg_ent")],
+        [InlineKeyboardButton(text="🛠 Поддержка", callback_data="pkg_support")],
+        [InlineKeyboardButton(text="⬅️ Меню", callback_data="go_menu")],
+    ])
+
+def pkg_text(key: str) -> str:
+    p = PRICING[key]
+    return (
+        f"<b>{esc(p['title'])}</b>\n\n"
+        f"{esc(p['desc'])}\n\n"
+        f"{_bullets_html(p['bullets'])}"
+    )
+
+def pkg_kb() -> InlineKeyboardMarkup:
+    # две кнопки: назад и «оплатить/заказать»
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад к тарифам", callback_data="go_prices"),
+         InlineKeyboardButton(text="💳 Оплатить / Заказать", callback_data="go_order")],
+    ])
+
 def esc(s: Optional[str]) -> str:
     return html.escape(s or "", quote=False)
 
@@ -479,12 +586,33 @@ async def cb_cases(c: CallbackQuery):
 
 @dp.callback_query(F.data == "go_prices")
 async def cb_prices(c: CallbackQuery):
-    txt = ("<b>Пакеты и цены:</b>\n\n"
-           "• <b>Lite</b> — 15–20k ₽\n"
-           "• <b>Standard</b> — 25–45k ₽\n"
-           "• <b>Pro</b> — 50–90k ₽\n\n"
-           "<i>Поддержка 3–10k ₽/мес</i>")
-    await safe_edit(c, txt); await c.answer()
+    await safe_edit(c, prices_root_text(), prices_root_kb())
+    await c.answer()
+
+@dp.callback_query(F.data == "pkg_lite")
+async def cb_pkg_lite(c: CallbackQuery):
+    await safe_edit(c, pkg_text("lite"), pkg_kb())
+    await c.answer()
+
+@dp.callback_query(F.data == "pkg_start")
+async def cb_pkg_start(c: CallbackQuery):
+    await safe_edit(c, pkg_text("start"), pkg_kb())
+    await c.answer()
+
+@dp.callback_query(F.data == "pkg_pro")
+async def cb_pkg_pro(c: CallbackQuery):
+    await safe_edit(c, pkg_text("pro"), pkg_kb())
+    await c.answer()
+
+@dp.callback_query(F.data == "pkg_ent")
+async def cb_pkg_ent(c: CallbackQuery):
+    await safe_edit(c, pkg_text("ent"), pkg_kb())
+    await c.answer()
+
+@dp.callback_query(F.data == "pkg_support")
+async def cb_pkg_support(c: CallbackQuery):
+    await safe_edit(c, pkg_text("support"), pkg_kb())
+    await c.answer()
 
 # --- Контакты + «написать админу» ---
 @dp.callback_query(F.data == "go_contacts")
