@@ -160,9 +160,11 @@ class Store:
     started_at = datetime.now(timezone.utc)
     users = set()
     stats = {"starts": 0, "quiz": 0, "orders": 0, "webquiz": 0, "contact_msgs": 0}
+
 Store.promos = {}
 Store.gift_claimed = set()
-Store.last_admin_dm = {}
+Store.last_admin_dm = {}   # {user_id: datetime_utc}
+Store.gift_offer = {}      # {user_id: {"start": dt, "expires": dt, "last_reminder": Optional[dt], "claimed": bool}}
 BOT_USERNAME = ""
 
 # ---------- FSM ----------
@@ -195,12 +197,17 @@ def humanize_timedelta(td: timedelta) -> str:
     return " ".join(parts)
 
 def get_or_start_offer(user_id: int) -> dict:
-    offer = Store.gift_offer.get(user_id)
+    offer_dict = getattr(Store, "gift_offer", None)
+    if offer_dict is None:
+        Store.gift_offer = {}
+        offer_dict = Store.gift_offer
+
+    offer = offer_dict.get(user_id)
     if not offer:
         start = now_utc()
         expires = start + timedelta(hours=PROMO_WINDOW_HOURS)
         offer = {"start": start, "expires": expires, "last_reminder": None, "claimed": False}
-        Store.gift_offer[user_id] = offer
+        offer_dict[user_id] = offer
     return offer
 
 def is_offer_active(offer: dict) -> bool:
