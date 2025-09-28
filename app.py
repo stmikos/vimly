@@ -165,6 +165,7 @@ Store.promos = {}
 Store.gift_claimed = set()
 Store.last_admin_dm = {}   # {user_id: datetime_utc}
 Store.gift_offer = {}      # {user_id: {"start": dt, "expires": dt, "last_reminder": Optional[dt], "claimed": bool}}
+Store.promos_by_code = {}   # code -> user_id
 BOT_USERNAME = ""
 
 # ---------- FSM ----------
@@ -215,11 +216,7 @@ def is_offer_active(offer: dict) -> bool:
 
 # обновлённая генерация промо — привязываем истечение к окну оффера
 def gen_promo_for(user_id: int, expires_at: Optional[datetime] = None) -> dict:
-    """
-    Генерация промокода для пользователя с привязкой к дедлайну.
-    Если expires_at не задан, берём текущее время + PROMO_WINDOW_HOURS.
-    """
-    suffix = secrets.token_hex(2).upper()
+    suffix = secrets.token_hex(2).upper()   # можно увеличить до token_hex(4)
     code = f"VIM-{str(user_id)[-4:]}-{suffix}"
     if expires_at is None:
         expires_at = datetime.now(timezone.utc) + timedelta(hours=PROMO_WINDOW_HOURS)
@@ -227,8 +224,10 @@ def gen_promo_for(user_id: int, expires_at: Optional[datetime] = None) -> dict:
         "code": code,
         "expires_utc": expires_at.strftime("%Y-%m-%d %H:%M UTC"),
         "expires_dt": expires_at,
+        "used": False,
     }
     Store.promos[user_id] = data
+    Store.promos_by_code[code] = user_id
     return data
 
 def _bullets_html(items: list[str]) -> str:
@@ -469,6 +468,53 @@ def build_lead(kind: str, m: Optional[Message], company: str, task: str, contact
     return txt2
     
 # ---- reminders loop (put this near other helpers) ----
+PROMO_DISCOUNT_PCT = 20  # % скидки для этого промо
+
+def get_promo_record_by_code(code: str) -> Optional[tuple[int, dict]]:
+    """Быстрый поиск: из кода получаем (user_id, запись) или None."""
+    uid = Store.promos_by_code.get((code or "").strip())
+    if uid is None:
+        return None
+    rec = Store.promos.get(uid)
+    if not rec or rec.get("code") != code:
+        return None
+    return uid, rec
+
+def validate_promo_for_user(user_id: int, code: str) -> tuple[bool, str, Optional[int]]:
+    """
+    Возвращает: (ok, msg, discount_pct_or_None)
+    """
+    code = (code or "").strip()
+    found = get_promo_record_by_code(code)
+    if not found:
+        return False, "Промокод не найден", None
+
+    uid, rec = found
+    # Промокод закрепляем за владельцем: либо тот же uid, либо мягкая проверка по последним 4 цифрам
+    if uid != user_id and (not str(user_id).endswith(str(uid)[-4:])):
+        return False, "Этот промокод оформлен на другого пользователя", None
+
+    if rec.get("used"):
+        return False, "Промокод уже использован", None
+
+    if datetime.now(timezone.utc) >= rec["expires_dt"]:
+        return False, "Срок действия промокода истёк", None
+
+    return True, "OK", PROMO_DISCOUNT_PCT
+
+def redeem_promo(user_id: int, code: str) -> tuple[bool, str, Optional[int]]:
+    """
+    То же что validate, но ещё помечает промо как использованное.
+    """
+    ok, msg, disc = validate_promo_for_user(user_id, code)
+    if not ok:
+        return ok, msg, None
+    # помечаем использованным
+    uid, rec = get_promo_record_by_code(code)  # точно есть
+    rec["used"] = True
+    Store.promos[uid] = rec
+    return True, "Промокод применён", disc
+
 async def promo_reminder_loop():
     while True:
         try:
