@@ -1197,14 +1197,38 @@ async def webhook(request: Request):
     return {"ok": True}
 
 # --- Error handler ---
-@dp.error()
-async def on_error(event, exception):
+# --- Error handler: aiogram 3.16+ ---
+from aiogram.types.error_event import ErrorEvent  # <-- новый импорт
+
+@dp.errors()
+async def on_error(event: ErrorEvent):
+    # аккуратно достанем исключение и контекст
+    exc = event.exception
     try:
+        who = None
+        # если это ошибка из message/callback — попробуем подписать отправителя
+        obj = getattr(event, "update", None)
+        if obj and getattr(obj, "message", None) and obj.message.from_user:
+            u = obj.message.from_user
+            who = f"{u.full_name} (@{u.username or '—'}, id={u.id})"
+        elif obj and getattr(obj, "callback_query", None) and obj.callback_query.from_user:
+            u = obj.callback_query.from_user
+            who = f"{u.full_name} (@{u.username or '—'}, id={u.id})"
+
+        text = "⚠️ Ошибка бота"
+        if who:
+            text += f" (от {who})"
+        text += f":\n<code>{html.escape(repr(exc), quote=False)}</code>"
+
+        # уведомим админа тихо
         if ADMIN_CHAT_ID:
-            await bot.send_message(ADMIN_CHAT_ID, f"⚠️ Ошибка: <code>{esc(repr(exception))}</code>")
-    except Exception:
-        pass
-    logging.exception("Handler error: %s", exception)
+            try:
+                await bot.send_message(ADMIN_CHAT_ID, text, disable_notification=True)
+            except Exception:
+                pass
+    finally:
+        # и обязательно залогируем с трейсбеком
+        logging.exception("Handler error: %s", exc)
 
 # ---------- LIFECYCLE ----------
 @app.on_event("startup")
