@@ -68,6 +68,9 @@ WEBHOOK_PATH = _norm_path(os.getenv("WEBHOOK_PATH") or "/telegram/webhook/vimly"
 WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
 MODE = (os.getenv("MODE") or "webhook").strip().lower()  # webhook | polling
 ADMIN_DM_COOLDOWN_SEC = int((os.getenv("ADMIN_DM_COOLDOWN_SEC") or "60").strip() or "60")
+PROMO_WINDOW_HOURS = int((os.getenv("PROMO_WINDOW_HOURS") or "72").strip() or "72")
+PROMO_REMINDER_EVERY_HOURS = int((os.getenv("PROMO_REMINDER_EVERY_HOURS") or "10").strip() or "10")
+REMINDER_LOOP_INTERVAL_SEC = int((os.getenv("REMINDER_LOOP_INTERVAL_SEC") or "600").strip() or "600")  # как часто опрашивать очередь (в сек)
 
 # ---------- PRICING ----------
 PRICING = {
@@ -175,6 +178,48 @@ class AdminMsg(StatesGroup):
     text = State()
 
 # ---------- HELPERS ----------
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+def humanize_timedelta(td: timedelta) -> str:
+    total = int(td.total_seconds())
+    if total <= 0:
+        return "0ч 0м"
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts = []
+    if days: parts.append(f"{days}д")
+    parts.append(f"{hours}ч")
+    parts.append(f"{minutes}м")
+    return " ".join(parts)
+
+def get_or_start_offer(user_id: int) -> dict:
+    offer = Store.gift_offer.get(user_id)
+    if not offer:
+        start = now_utc()
+        expires = start + timedelta(hours=PROMO_WINDOW_HOURS)
+        offer = {"start": start, "expires": expires, "last_reminder": None, "claimed": False}
+        Store.gift_offer[user_id] = offer
+    return offer
+
+def is_offer_active(offer: dict) -> bool:
+    return now_utc() < offer["expires"]
+
+# обновлённая генерация промо — привязываем истечение к окну оффера
+def gen_promo_for(user_id: int, expires_at: Optional[datetime] = None) -> dict:
+    suffix = secrets.token_hex(2).upper()
+    code = f"VIM-{str(user_id)[-4:]}-{suffix}"
+    if expires_at is None:
+        expires_at = now_utc() + timedelta(hours=PROMO_WINDOW_HOURS)
+    data = {
+        "code": code,
+        "expires_utc": expires_at.strftime("%Y-%m-%d %H:%M UTC"),
+        "expires_dt": expires_at,
+    }
+    Store.promos[user_id] = data
+    return data
+
 def _bullets_html(items: list[str]) -> str:
     return "\n".join(f"• {esc(x)}" for x in items)
 
@@ -411,6 +456,40 @@ def build_lead(kind: str, m: Optional[Message], company: str, task: str, contact
             f"UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
         )
     return txt2
+    
+    async def promo_reminder_loop():
+    while True:
+        try:
+            now = now_utc()
+            for uid, offer in list(Store.gift_offer.items()):
+                # если уже забрал промо или окно истекло — пропускаем
+                if offer.get("claimed"):
+                    continue
+                if now >= offer["expires"]:
+                    continue
+                last = offer.get("last_reminder")
+                need = (last is None) or ((now - last).total_seconds() >= PROMO_REMINDER_EVERY_HOURS * 3600)
+                if not need:
+                    continue
+
+                left = offer["expires"] - now
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🎟 Получить промокод −20%", callback_data="gift_promo")]
+                ])
+                try:
+                    await bot.send_message(
+                        uid,
+                        f"Нежное напоминание 💙\nВаш бонус −20% ещё активен.\nОсталось: {humanize_timedelta(left)}",
+                        reply_markup=kb,
+                        disable_web_page_preview=True
+                    )
+                    offer["last_reminder"] = now
+                except Exception as e:
+                    log.warning("Promo reminder to %s failed: %s", uid, e)
+        except Exception as e:
+            log.exception("promo_reminder_loop error: %s", e)
+        await asyncio.sleep(REMINDER_LOOP_INTERVAL_SEC)
+
 
 # ---------- UI ----------
 def main_kb(is_private: bool, is_admin: bool) -> InlineKeyboardMarkup:
@@ -696,12 +775,24 @@ async def contact_any(m: Message, state: FSMContext):
 # --- Подарок ---
 @dp.callback_query(F.data == "go_gift")
 async def cb_gift(c: CallbackQuery):
+    uid = c.from_user.id
+    offer = get_or_start_offer(uid)
+    left = max(timedelta(0), offer["expires"] - now_utc())
+    left_txt = humanize_timedelta(left)
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📄 Чек-лист PDF", callback_data="gift_pdf"),
          InlineKeyboardButton(text="🎟 Промокод −20% (72ч)", callback_data="gift_promo")],
         [InlineKeyboardButton(text="⬅️ Меню", callback_data="go_menu")]
     ])
-    await safe_edit(c, "<b>Выберите подарок</b>: чек-лист PDF или промокод −20% на Lite (72ч).", kb); await c.answer()
+    txt = (
+        "<b>Выберите подарок</b> — доступно 72 часа.\n"
+        f"⏳ Осталось: <b>{left_txt}</b>\n\n"
+        "• Чек-лист PDF — сразу в чат\n"
+        "• Промокод −20% на пакет Lite"
+    )
+    await safe_edit(c, txt, kb)
+    await c.answer()
 
 @dp.callback_query(F.data == "gift_pdf")
 async def cb_gift_pdf(c: CallbackQuery):
@@ -723,13 +814,52 @@ async def cb_gift_pdf(c: CallbackQuery):
 @dp.callback_query(F.data == "gift_promo")
 async def cb_gift_promo(c: CallbackQuery):
     uid = c.from_user.id
-    promo = Store.promos.get(uid) or gen_promo_for(uid)
-    txt = ("<b>Ваш промокод: </b><code>{code}</code>\n"
-           "Скидка: −20% на Lite, до {exp}\n"
-           "Примените при подтверждении заказа.").format(code=esc(promo["code"]), exp=esc(promo["expires_utc"]))
+    offer = get_or_start_offer(uid)
+    now = now_utc()
+
+    if now >= offer["expires"]:
+        # окно истекло — промо больше нельзя получить
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 Заказать без промокода", callback_data="go_order")],
+            [InlineKeyboardButton(text="⬅️ Меню", callback_data="go_menu")],
+        ])
+        await c.message.answer("⚠️ Время действия подарка истекло. Промокод больше недоступен.", reply_markup=kb)
+        await c.answer()
+        return
+
+    # Если уже выдавали промо — повторно просто показываем тот же код и оставшееся время
+    promo = Store.promos.get(uid)
+    if promo:
+        left = max(timedelta(0), promo["expires_dt"] - now)
+        txt = (
+            f"<b>Ваш промокод:</b> <code>{esc(promo['code'])}</code>\n"
+            f"Действует до: {esc(promo['expires_utc'])}\n"
+            f"⏳ Осталось: {humanize_timedelta(left)}\n\n"
+            "Примените при подтверждении заказа."
+        )
+        await c.message.answer(txt)
+        await c.answer()
+        return
+
+    # Выдаём новый код с истечением ровно по окну оффера
+    promo = gen_promo_for(uid, expires_at=offer["expires"])
+    offer["claimed"] = True  # чтобы перестать слать напоминания
+
+    left = max(timedelta(0), offer["expires"] - now)
+    txt = (
+        f"<b>Ваш промокод:</b> <code>{esc(promo['code'])}</code>\n"
+        f"Действует до: {esc(promo['expires_utc'])}\n"
+        f"⏳ Осталось: {humanize_timedelta(left)}\n\n"
+        "Примените при подтверждении заказа."
+    )
     await c.message.answer(txt)
-    await notify_admin(f"🎟 Промокод выдан: {c.from_user.full_name} → {promo['code']} (до {promo['expires_utc']})")
-    Store.gift_claimed.add(uid)
+
+    delivered = await notify_admin(
+        f"🎟 Промокод выдан: {c.from_user.full_name} → {promo['code']} (до {promo['expires_utc']})"
+    )
+    if not delivered:
+        await c.message.answer(LEADS_FAIL_MSG)
+
     await c.answer()
 
 # --- Заказ (контакт) ---
@@ -1134,6 +1264,13 @@ async def on_startup():
             log.warning("BASE_URL is not set; webhook not configured")
     else:
         log.info("Polling mode — use __main__ launcher")
+            
+    # reminders
+    try:
+        app.state.promo_task = asyncio.create_task(promo_reminder_loop())
+    except Exception as e:
+        log.warning("Failed to start promo reminder loop: %s", e)
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -1141,6 +1278,15 @@ async def on_shutdown():
         await bot.session.close()
     except Exception:
         pass
+
+    # stop reminders
+    try:
+        task = getattr(app.state, "promo_task", None)
+        if task:
+            task.cancel()
+    except Exception:
+        pass
+
 
 # ---------- LOCAL POLLING ----------
 if __name__ == "__main__":
