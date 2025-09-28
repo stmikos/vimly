@@ -457,19 +457,21 @@ def build_lead(kind: str, m: Optional[Message], company: str, task: str, contact
         )
     return txt2
     
-    async def promo_reminder_loop():
+# ---- reminders loop (put this near other helpers) ----
+async def promo_reminder_loop():
     while True:
         try:
             now = now_utc()
             for uid, offer in list(Store.gift_offer.items()):
-                # если уже забрал промо или окно истекло — пропускаем
+                # уже забрал или истекло окно — пропускаем
                 if offer.get("claimed"):
                     continue
                 if now >= offer["expires"]:
                     continue
+
                 last = offer.get("last_reminder")
-                need = (last is None) or ((now - last).total_seconds() >= PROMO_REMINDER_EVERY_HOURS * 3600)
-                if not need:
+                # нужен ли пинг сейчас?
+                if last is not None and (now - last).total_seconds() < PROMO_REMINDER_EVERY_HOURS * 3600:
                     continue
 
                 left = offer["expires"] - now
@@ -486,10 +488,11 @@ def build_lead(kind: str, m: Optional[Message], company: str, task: str, contact
                     offer["last_reminder"] = now
                 except Exception as e:
                     log.warning("Promo reminder to %s failed: %s", uid, e)
+
         except Exception as e:
             log.exception("promo_reminder_loop error: %s", e)
-        await asyncio.sleep(REMINDER_LOOP_INTERVAL_SEC)
 
+        await asyncio.sleep(REMINDER_LOOP_INTERVAL_SEC)
 
 # ---------- UI ----------
 def main_kb(is_private: bool, is_admin: bool) -> InlineKeyboardMarkup:
