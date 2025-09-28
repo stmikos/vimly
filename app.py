@@ -215,10 +215,14 @@ def is_offer_active(offer: dict) -> bool:
 
 # обновлённая генерация промо — привязываем истечение к окну оффера
 def gen_promo_for(user_id: int, expires_at: Optional[datetime] = None) -> dict:
+    """
+    Генерация промокода для пользователя с привязкой к дедлайну.
+    Если expires_at не задан, берём текущее время + PROMO_WINDOW_HOURS.
+    """
     suffix = secrets.token_hex(2).upper()
     code = f"VIM-{str(user_id)[-4:]}-{suffix}"
     if expires_at is None:
-        expires_at = now_utc() + timedelta(hours=PROMO_WINDOW_HOURS)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=PROMO_WINDOW_HOURS)
     data = {
         "code": code,
         "expires_utc": expires_at.strftime("%Y-%m-%d %H:%M UTC"),
